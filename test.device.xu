@@ -1,0 +1,46 @@
+@main
+
+#internal/device
+#strings
+
+fn test_device_defaults() {
+    c := device.load("/nonexistent/devices.toml") or (err) {
+        assert(false)
+        <<
+    }
+    assert(c.mqtt_host == "127.0.0.1" && c.mqtt_port == 1883 && c.transfer_port == 8766 && c.auto_link && c.devices.len == 0)
+}
+
+fn test_device_multi_peer_same_topic_and_roundtrip() {
+    src := "[mqtt]\nhost = \"10.0.0.5\"\nport = 1884\ndefault_topic = \"xu/esp32/rack\"\n\n[esp]\nhttp_port = 8767\nauto_link = false\n\n[[device]]\nid = \"phone-1\"\nphone_name = \"Sales-01\"\nmqtt_topic = \"xu/esp32/cyd\"\nble_slot = 0\n\n[[device]]\nid = \"phone-2\"\nphone_name = \"Sales-02\"\nmqtt_topic = \"xu/esp32/cyd\"\nble_slot = 1\nhome = \"assistive:100,200\"\n"
+    c := device.parse(&src) or (err) {
+        assert(false)
+        <<
+    }
+    assert(c.mqtt_host == "10.0.0.5" && c.mqtt_port == 1884 && c.default_topic == "xu/esp32/rack")
+    assert(c.transfer_port == 8767 && !c.auto_link && c.devices.len == 2)
+    assert(c.devices[0].ble_slot == 0 && c.devices[1].ble_slot == 1 && c.devices[1].home == "assistive:100,200")
+
+    formatted := device.format_toml(&c)
+    c2 := device.parse(&formatted) or (err) {
+        assert(false)
+        <<
+    }
+    assert(c2.mqtt_host == "10.0.0.5" && c2.devices.len == 2 && !c2.auto_link)
+}
+
+fn expect_parse_error(src &string, want string) {
+    device.parse(src) or (err) {
+        assert(err.msg() == want)
+        <<
+    }
+    assert(false)
+}
+
+fn test_device_rejects_duplicate_slot_and_id() {
+    dup_id := "[[device]]\nid = \"x\"\nmqtt_topic = \"t\"\n\n[[device]]\nid = \"x\"\nmqtt_topic = \"u\"\n"
+    expect_parse_error(&dup_id, "devices: duplicate id x")
+
+    dup_slot := "[[device]]\nid = \"a\"\nmqtt_topic = \"xu/esp32/cyd\"\nble_slot = 1\n\n[[device]]\nid = \"b\"\nmqtt_topic = \"xu/esp32/cyd\"\nble_slot = 1\n"
+    expect_parse_error(&dup_slot, "devices: duplicate ble_slot 1")
+}

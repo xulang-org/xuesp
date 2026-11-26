@@ -1,0 +1,150 @@
+@internal/hub
+
+#errors
+#encoding/json
+
+pub struct Req {
+    pub op string
+    pub device string
+    pub devices []string
+    pub id int
+    pub text string
+    pub x int
+    pub y int
+    pub x2 int
+    pub y2 int
+    pub duration_ms int
+    pub key string
+    pub submit bool
+    pub path string
+    pub mode string
+    pub name string
+    pub goal string
+    pub ble_slot int
+    pub ble_peer string
+    pub mqtt_topic string
+    pub ms int
+    pub title string
+    pub desc string
+    pub ssid string
+    pub pass string
+    pub mqtt_uri string
+    pub root string
+    pub raw string
+    pub btn int
+    pub code int
+    pub mod int
+    pub down bool
+    pub w int
+    pub h int
+}
+
+fn is_valid_op(op &string) bool {
+    << *op == "cluster_state" || *op == "studio_state" || *op == "esp_nodes" || *op == "devices" ||
+       *op == "auto_link" || *op == "device_bind" || *op == "device_set" || *op == "bind_slot" ||
+       *op == "ble_status" || *op == "ble_adv" || *op == "ble_disconnect" || *op == "esp_reset_wifi" ||
+       *op == "provision_scan" || *op == "provision_write" || *op == "provision_result" || *op == "provision_status" ||
+       *op == "exec" || *op == "batch_exec" || *op == "batch" ||
+       *op == "mouse_down" || *op == "mouse_move" || *op == "mouse_up" || *op == "key_event" || *op == "screen_size" ||
+       *op == "tap" || *op == "tap_dock" || *op == "double_tap" || *op == "long_press" || *op == "swipe" ||
+       *op == "key" || *op == "shortcut" || *op == "consumer" ||
+       *op == "input" || *op == "submit" || *op == "paste" || *op == "clear_input" ||
+       *op == "focus_url" || *op == "new_tab" || *op == "spotlight" || *op == "back" || *op == "home" || *op == "stop" ||
+       *op == "wait" || *op == "push_file" || *op == "pull_file" ||
+       *op == "trace_clear" || *op == "trace_save" || *op == "trace_to_macro" || *op == "run_flow" ||
+       *op == "macro_list" || *op == "macro_save" || *op == "macro_delete" || *op == "macro_run"
+}
+
+fn str_opt(doc &json.Doc, root int, key string) string {
+    n := doc.get(root, key)
+    if n < 0 || !doc.is_string(n) {
+        << ""
+    }
+    << doc.as_string(n) or (err) {
+        << ""
+    }
+}
+
+fn int_opt(doc &json.Doc, root int, key string, def int) int {
+    n := doc.get(root, key)
+    if n < 0 || !doc.is_number(n) {
+        << def
+    }
+    << doc.number_int(n)
+}
+
+fn bool_opt(doc &json.Doc, root int, key string, def bool) bool {
+    n := doc.get(root, key)
+    if n < 0 || !doc.is_bool(n) {
+        << def
+    }
+    << doc.as_bool(n) or (err) {
+        << def
+    }
+}
+
+pub fn parse_request(s &string) Req {
+    doc := json.parse(s)
+    if !doc.ok() || !doc.is_dict(doc.root()) {
+        >> errors.new("bad_request")
+    }
+    root := doc.root()
+    op_n := doc.get(root, "op")
+    if op_n < 0 || !doc.is_string(op_n) {
+        >> errors.new("bad_request")
+    }
+    op := doc.as_string(op_n) or >>
+    if !is_valid_op(&op) {
+        >> errors.new("bad_request")
+    }
+    $devs := []string{}
+    dn := doc.get(root, "devices")
+    if dn >= 0 && doc.is_list(dn) {
+        for i in 0:doc.count(dn) {
+            en := doc.at(dn, i)
+            if doc.is_string(en) {
+                dv := doc.as_string(en) or (e) { -> }
+                devs.push(dv)
+            }
+        }
+    }
+    << Req{
+        op: op,
+        device: str_opt(&doc, root, "device"),
+        devices: devs,
+        id: int_opt(&doc, root, "id", 0),
+        text: str_opt(&doc, root, "text"),
+        x: int_opt(&doc, root, "x", 16384),
+        y: int_opt(&doc, root, "y", 16384),
+        x2: int_opt(&doc, root, "x2", 16384),
+        y2: int_opt(&doc, root, "y2", 16384),
+        duration_ms: int_opt(&doc, root, "duration_ms", 260),
+        key: str_opt(&doc, root, "key"),
+        submit: bool_opt(&doc, root, "submit", false),
+        path: str_opt(&doc, root, "path"),
+        mode: str_opt(&doc, root, "mode"),
+        name: str_opt(&doc, root, "name"),
+        goal: str_opt(&doc, root, "goal"),
+        ble_slot: int_opt(&doc, root, "ble_slot", -1),
+        ble_peer: str_opt(&doc, root, "ble_peer"),
+        mqtt_topic: str_opt(&doc, root, "mqtt_topic"),
+        ms: int_opt(&doc, root, "ms", 0),
+        title: str_opt(&doc, root, "title"),
+        desc: str_opt(&doc, root, "desc"),
+        ssid: str_opt(&doc, root, "ssid"),
+        pass: str_opt(&doc, root, "pass"),
+        mqtt_uri: str_opt(&doc, root, "mqtt_uri"),
+        root: str_opt(&doc, root, "root"),
+        raw: *s + "",
+        btn: int_opt(&doc, root, "btn", 0),
+        code: int_opt(&doc, root, "code", 0),
+        mod: int_opt(&doc, root, "mod", 0),
+        down: bool_opt(&doc, root, "down", true),
+        w: int_opt(&doc, root, "w", 0),
+        h: int_opt(&doc, root, "h", 0)
+    }
+}
+
+pub fn error_message(code string) string {
+    << "{\"op\":\"error\",\"code\":\"" + code + "\"}"
+}

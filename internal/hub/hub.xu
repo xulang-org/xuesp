@@ -1,0 +1,424 @@
+@internal/hub
+
+#os
+#strconv
+#strings
+#internal/device
+#internal/control
+#internal/transfer
+#internal/flow
+
+pub struct RouteTarget {
+    pub id string
+    pub phone_name string
+    pub topic string
+    pub slot int
+    pub ble_peer string
+    pub home string
+    pub group string
+    pub found bool
+}
+
+pub fn blank_target() RouteTarget {
+    << RouteTarget{
+        id: "",
+        phone_name: "",
+        topic: "",
+        slot: -1,
+        ble_peer: "",
+        home: "button2",
+        group: "default",
+        found: false
+    }
+}
+
+pub fn (t &RouteTarget) clone() RouteTarget {
+    << RouteTarget{
+        id: t.id + "",
+        phone_name: t.phone_name + "",
+        topic: t.topic + "",
+        slot: t.slot,
+        ble_peer: t.ble_peer + "",
+        home: t.home + "",
+        group: t.group + "",
+        found: t.found
+    }
+}
+
+pub struct Hub {
+    pub dir_box chan string
+    pub cfg_box chan device.Config
+    pub ctl control.Controller
+    pub xfer transfer.Hub
+    pub traces flow.TraceStore
+    pub logs_box chan []string
+    pub stop_box chan int
+    pub prov_job_box chan string
+    pub prov_res_box chan string
+    pub auto_box chan bool
+}
+
+pub fn new_hub() Hub {
+    << new_hub_with_config(os.temp_dir() + "/xuesp", device.default_config())
+}
+
+pub fn new_hub_with_config(state_dir string, cfg device.Config) Hub {
+    dir_box := chan string{cap: 1}
+    dir_box <- state_dir + ""
+    cfg_box := chan device.Config{cap: 1}
+    cfg_box <- cfg.clone()
+    logs_box := chan []string{cap: 1}
+    logs_box <- []string{}
+    stop_box := chan int{cap: 1}
+    stop_box <- 0
+    prov_job_box := chan string{cap: 1}
+    prov_job_box <- ""
+    prov_res_box := chan string{cap: 1}
+    prov_res_box <- ""
+    auto_box := chan bool{cap: 1}
+    auto_box <- cfg.auto_link
+    $dtopic := cfg.default_topic + ""
+    if dtopic.len == 0 {
+        dtopic = "xu/esp32/cyd"
+    }
+    << Hub{
+        dir_box: dir_box,
+        cfg_box: cfg_box,
+        ctl: control.new_controller(cfg.mqtt_host + "", cfg.mqtt_port, dtopic),
+        xfer: transfer.new_hub(cfg.transfer_port, state_dir + "/inbox"),
+        traces: flow.new_store(state_dir + "/flows"),
+        logs_box: logs_box,
+        stop_box: stop_box,
+        prov_job_box: prov_job_box,
+        prov_res_box: prov_res_box,
+        auto_box: auto_box
+    }
+}
+
+pub fn (h &Hub) clone() Hub {
+    << Hub{
+        dir_box: h.dir_box,
+        cfg_box: h.cfg_box,
+        ctl: h.ctl.clone(),
+        xfer: h.xfer.clone(),
+        traces: h.traces.clone(),
+        logs_box: h.logs_box,
+        stop_box: h.stop_box,
+        prov_job_box: h.prov_job_box,
+        prov_res_box: h.prov_res_box,
+        auto_box: h.auto_box
+    }
+}
+
+pub fn (h &Hub) stop_seq() int {
+    v := <-h.stop_box
+    h.stop_box <- v
+    << v
+}
+
+pub fn (h &Hub) bump_stop() int {
+    v := <-h.stop_box
+    next := v + 1
+    h.stop_box <- next
+    << next
+}
+
+pub fn (h &Hub) state_dir() string {
+    d := <-h.dir_box
+    out := d + ""
+    h.dir_box <- d
+    << out
+}
+
+pub fn (h &Hub) get_config() device.Config {
+    c := <-h.cfg_box
+    out := c.clone()
+    h.cfg_box <- c
+    << out
+}
+
+pub fn (h &Hub) set_config(c device.Config) {
+    _ := <-h.cfg_box
+    h.cfg_box <- c.clone()
+    _ := device.save(h.state_dir() + "/devices.toml", &c)
+}
+
+pub fn (h &Hub) append_log(line string) {
+    list := <-h.logs_box
+    $next := []string{}
+    $start := 0
+    if list.len >= 60 {
+        start = list.len - 59
+    }
+    for i in start:list.len {
+        next.push(list[i] + "")
+    }
+    next.push(line)
+    h.logs_box <- next
+}
+
+pub fn (h &Hub) logs() []string {
+    list := <-h.logs_box
+    $out := []string{}
+    for i in 0:list.len {
+        out.push(list[i] + "")
+    }
+    h.logs_box <- list
+    << out
+}
+
+pub fn (h &Hub) set_prov_job(job string) {
+    cur := <-h.prov_job_box
+    h.prov_job_box <- job + ""
+    _ := cur
+}
+
+pub fn (h &Hub) prov_job() string {
+    job := <-h.prov_job_box
+    h.prov_job_box <- job + ""
+    << job + ""
+}
+
+pub fn (h &Hub) set_prov_result(result string) {
+    cur := <-h.prov_res_box
+    h.prov_res_box <- result + ""
+    _ := cur
+}
+
+pub fn (h &Hub) prov_result() string {
+    res := <-h.prov_res_box
+    h.prov_res_box <- res + ""
+    << res + ""
+}
+
+pub fn (h &Hub) auto_link() bool {
+    cur := <-h.auto_box
+    h.auto_box <- cur
+    << cur
+}
+
+pub fn (h &Hub) set_auto_link(on bool) {
+    _ := <-h.auto_box
+    h.auto_box <- on
+}
+
+pub fn peer_id(p &control.BlePeer) string {
+    $tail := ""
+    for i in 0:p.bda.len {
+        c := p.bda[i:i + 1] + ""
+        if c != ":" {
+            tail.push_str(c)
+        }
+    }
+    if tail.len > 4 {
+        tail = tail[tail.len - 4:tail.len] + ""
+    }
+    if tail.len == 0 {
+        tail = strconv.itoa(p.slot)
+    }
+    << "peer-" + strings.to_lower(&tail)
+}
+
+fn overlay_live_peer(t $&RouteTarget, peers &[]control.BlePeer) {
+    for p in peers {
+        hit := (t.ble_peer.len > 0 && t.ble_peer == p.bda) ||
+               (t.phone_name.len > 0 && p.name.len > 0 && t.phone_name == p.name)
+        if hit {
+            if p.mqtt_topic.len > 0 { t.topic = p.mqtt_topic + "" }
+            t.slot = p.slot
+            if p.bda.len > 0 { t.ble_peer = p.bda + "" }
+            if t.phone_name.len == 0 && p.name.len > 0 { t.phone_name = p.name + "" }
+            <<
+        }
+    }
+}
+
+fn target_from_device(d &device.Device, def_topic &string, peers &[]control.BlePeer) RouteTarget {
+    $topic := d.mqtt_topic + ""
+    if topic.len == 0 { topic = *def_topic + "" }
+    if topic.len == 0 { topic = "xu/esp32/cyd" }
+    $home := d.home + ""
+    if home.len == 0 { home = "button2" }
+    $grp := d.group + ""
+    if grp.len == 0 { grp = "default" }
+    $rt := RouteTarget{
+        id: d.id + "",
+        phone_name: d.phone_name + "",
+        topic: topic,
+        slot: d.ble_slot,
+        ble_peer: d.ble_peer + "",
+        home: home,
+        group: grp,
+        found: true
+    }
+    overlay_live_peer($&rt, peers)
+    << rt
+}
+
+fn target_from_peer(p &control.BlePeer, def_topic &string) RouteTarget {
+    $topic := p.mqtt_topic + ""
+    if topic.len == 0 { topic = *def_topic + "" }
+    if topic.len == 0 { topic = "xu/esp32/cyd" }
+    $name := p.name + ""
+    if name.len == 0 { name = p.bda + "" }
+    << RouteTarget{
+        id: peer_id(p),
+        phone_name: name,
+        topic: topic,
+        slot: p.slot,
+        ble_peer: p.bda + "",
+        home: "button2",
+        group: "default",
+        found: true
+    }
+}
+
+// resolve_target resolves a device selector (id, phone_name, ble_peer,
+// "peer-xxxx", or "<topic>#<slot>") to an ESP32 node topic and BLE slot.
+pub fn (h &Hub) resolve_target(sel &string) RouteTarget {
+    cfg := h.get_config()
+    peers := h.ctl.peers()
+
+    if sel.len > 0 && strings.contains(sel, "#") {
+        cut := strings.cut(sel, "#")
+        if cut.found && cut.before.len > 0 && cut.after.len > 0 {
+            slot := strconv.atoi(&cut.after) or (err) {
+                << blank_target()
+            }
+            if slot >= 0 && slot < device.SLOTS_PER_NODE {
+                << RouteTarget{
+                    id: *sel + "",
+                    phone_name: *sel + "",
+                    topic: cut.before + "",
+                    slot: slot,
+                    ble_peer: "",
+                    home: "button2",
+                    group: "default",
+                    found: true
+                }
+            }
+        }
+    }
+
+    if sel.len == 0 {
+        if cfg.devices.len == 1 {
+            << target_from_device(&cfg.devices[0], &cfg.default_topic, &peers)
+        }
+        if cfg.devices.len == 0 && peers.len == 1 {
+            << target_from_peer(&peers[0], &cfg.default_topic)
+        }
+        << blank_target()
+    }
+
+    for d in cfg.devices {
+        if d.id == *sel || (d.phone_name.len > 0 && d.phone_name == *sel) || (d.ble_peer.len > 0 && d.ble_peer == *sel) {
+            << target_from_device(&d, &cfg.default_topic, &peers)
+        }
+    }
+
+    for p in peers {
+        pid := peer_id(&p)
+        if pid == *sel || (p.name.len > 0 && p.name == *sel) || (p.bda.len > 0 && p.bda == *sel) {
+            << target_from_peer(&p, &cfg.default_topic)
+        }
+    }
+
+    << blank_target()
+}
+
+// all_targets lists all configured devices (with live peer overlay) followed
+// by any live BLE peers not yet claimed by a [[device]] entry.
+pub fn (h &Hub) all_targets() []RouteTarget {
+    cfg := h.get_config()
+    peers := h.ctl.peers()
+    $out := []RouteTarget{}
+    for d in cfg.devices {
+        out.push(target_from_device(&d, &cfg.default_topic, &peers))
+    }
+    for p in peers {
+        $claimed := false
+        for t in out {
+            if t.ble_peer.len > 0 && p.bda.len > 0 && t.ble_peer == p.bda {
+                claimed = true
+                <-
+            }
+            if t.topic == p.mqtt_topic && t.slot == p.slot {
+                claimed = true
+                <-
+            }
+            if t.phone_name.len > 0 && p.name.len > 0 && t.phone_name == p.name {
+                claimed = true
+                <-
+            }
+        }
+        if !claimed {
+            out.push(target_from_peer(&p, &cfg.default_topic))
+        }
+    }
+    << out
+}
+
+// reconcile_links heals configured [[device]] entries when a known BLE peer
+// appears on another ESP32 node or slot, saving devices.toml only on change.
+pub fn (h &Hub) reconcile_links() {
+    if !h.auto_link() {
+        <<
+    }
+    $cfg := h.get_config()
+    peers := h.ctl.peers()
+    $changed := false
+    for i in 0:cfg.devices.len {
+        $d := cfg.devices[i].clone()
+        for p in peers {
+            hit := (d.ble_peer.len > 0 && d.ble_peer == p.bda) ||
+                   (d.phone_name.len > 0 && p.name.len > 0 && d.phone_name == p.name)
+            if !hit {
+                ->
+            }
+            if d.mqtt_topic != p.mqtt_topic || d.ble_slot != p.slot || d.ble_peer != p.bda {
+                d.mqtt_topic = p.mqtt_topic + ""
+                d.ble_slot = p.slot
+                d.ble_peer = p.bda + ""
+                cfg.devices[i] = d.clone()
+                changed = true
+                h.append_log("[auto-link] " + d.id + " -> " + p.mqtt_topic + " #" + strconv.itoa(p.slot))
+            }
+            <-
+        }
+    }
+    if changed {
+        h.set_config(cfg.clone())
+    }
+}
+
+pub fn (h &Hub) upsert_device_config(id &string, phone_name &string, topic &string, ble_slot int, ble_peer &string, group &string) {
+    $cfg := h.get_config()
+    idx := cfg.find_by_id(id)
+    if idx >= 0 {
+        $d := cfg.devices[idx].clone()
+        if phone_name.len > 0 { d.phone_name = *phone_name + "" }
+        if topic.len > 0 { d.mqtt_topic = *topic + "" }
+        if ble_slot >= 0 { d.ble_slot = ble_slot }
+        if ble_peer.len > 0 { d.ble_peer = *ble_peer + "" }
+        if group.len > 0 { d.group = *group + "" }
+        cfg.devices[idx] = d
+    } else {
+        $t := *topic + ""
+        if t.len == 0 {
+            t = cfg.default_topic + ""
+        }
+        if t.len == 0 { t = "xu/esp32/cyd" }
+        $grp := *group + ""
+        if grp.len == 0 { grp = "default" }
+        cfg.devices.push(device.Device{
+            id: *id + "",
+            phone_name: *phone_name + "",
+            mqtt_topic: t,
+            ble_peer: *ble_peer + "",
+            ble_slot: ble_slot,
+            home: "button2",
+            group: grp
+        })
+    }
+    h.set_config(cfg)
+}

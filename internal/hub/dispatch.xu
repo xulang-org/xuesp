@@ -1,0 +1,882 @@
+@internal/hub
+
+#internal/device
+#internal/control
+#internal/flow
+#strconv
+#strings
+#time
+#encoding/json
+
+fn key_name_to_hid(k &string) int {
+    if *k == "enter" || *k == "return" { << 40 }
+    if *k == "escape" || *k == "esc" { << 41 }
+    if *k == "backspace" || *k == "delete" { << 42 }
+    if *k == "tab" { << 43 }
+    if *k == "space" { << 44 }
+    if *k == "capslock" { << 57 }
+    if *k == "right" { << 79 }
+    if *k == "left" { << 80 }
+    if *k == "down" { << 81 }
+    if *k == "up" { << 82 }
+    << 40
+}
+
+fn consumer_name_to_mask(k &string) int {
+    if *k == "vol_up" { << 1 }
+    if *k == "vol_down" { << 2 }
+    if *k == "mute" { << 4 }
+    if *k == "power" || *k == "lock" { << 8 }
+    if *k == "home" || *k == "menu" { << 16 }
+    << 16
+}
+
+fn exec_shortcut_name(h &Hub, rt &RouteTarget, name &string) bool {
+    if *name == "cmd_space" || *name == "spotlight" {
+        << h.ctl.spotlight(&rt.topic, rt.slot)
+    }
+    if *name == "cmd_l" || *name == "focus_url" {
+        << h.ctl.focus_url(&rt.topic, rt.slot)
+    }
+    if *name == "cmd_t" || *name == "new_tab" {
+        << h.ctl.new_tab(&rt.topic, rt.slot)
+    }
+    if *name == "cmd_w" {
+        << h.ctl.send_key_code(&rt.topic, rt.slot, 8, 26)
+    }
+    if *name == "cmd_a" {
+        << h.ctl.send_key_code(&rt.topic, rt.slot, 8, 4)
+    }
+    if *name == "cmd_c" {
+        << h.ctl.send_key_code(&rt.topic, rt.slot, 8, 6)
+    }
+    if *name == "cmd_v" {
+        << h.ctl.send_key_code(&rt.topic, rt.slot, 8, 25)
+    }
+    if *name == "ctrl_space" {
+        << h.ctl.send_key_code(&rt.topic, rt.slot, 1, 44)
+    }
+    << false
+}
+
+fn dock_x_for_index(idx int) int {
+    if idx == 1 { << 4600 }
+    if idx == 2 { << 12400 }
+    if idx == 3 { << 20200 }
+    if idx == 4 { << 28000 }
+    << 12400
+}
+
+fn trim_ws(s &string) string {
+    $a := 0
+    $b := s.len
+    while a < b && ((s[a] & 255) == 32 || (s[a] & 255) == 9 || (s[a] & 255) == 13 || (s[a] & 255) == 10) {
+        a += 1
+    }
+    while b > a && ((s[b - 1] & 255) == 32 || (s[b - 1] & 255) == 9 || (s[b - 1] & 255) == 13 || (s[b - 1] & 255) == 10) {
+        b -= 1
+    }
+    if a >= b {
+        << ""
+    }
+    << s[a:b] + ""
+}
+
+fn replace_arg_placeholder(cmd &string, arg &string) string {
+    pat := "$${arg}"
+    idx := strings.index_of(cmd, pat)
+    if idx < 0 {
+        << *cmd + ""
+    }
+    << cmd[0:idx] + *arg + cmd[idx + 6:cmd.len]
+}
+
+fn ok_json(cmd &string, ok bool) string {
+    $oks := "false"
+    if ok { oks = "true" }
+    << "{\"ok\":" + oks + ",\"cmd\":" + json.quote(cmd) + "}"
+}
+
+pub fn exec_single_cmd(h &Hub, rt &RouteTarget, raw_cmd &string, id int, now_ms int) string {
+    line := trim_ws(raw_cmd)
+    if line.len == 0 {
+        << "{\"ok\":true,\"cmd\":\"\"}"
+    }
+    if strings.has_prefix(&line, "macro:") {
+        rest := line[6:line.len] + ""
+        sp := strings.index_of(&rest, " ")
+        $mname := rest + ""
+        $marg := ""
+        if sp > 0 {
+            mname = rest[0:sp] + ""
+            marg = trim_ws(&(rest[sp + 1:rest.len] + ""))
+        }
+        << exec_macro_by_name(h, rt, &mname, &marg, id, now_ms)
+    }
+    sp := strings.index_of(&line, " ")
+    $verb := line + ""
+    $rest := ""
+    if sp > 0 {
+        verb = line[0:sp] + ""
+        rest = trim_ws(&(line[sp + 1:line.len] + ""))
+    }
+
+    if verb == "run_macro" {
+        sp2 := strings.index_of(&rest, " ")
+        $mname := rest + ""
+        $marg := ""
+        if sp2 > 0 {
+            mname = rest[0:sp2] + ""
+            marg = trim_ws(&(rest[sp2 + 1:rest.len] + ""))
+        }
+        << exec_macro_by_name(h, rt, &mname, &marg, id, now_ms)
+    }
+    if verb == "wait" || verb == "sleep" {
+        ms := strconv.atoi(&rest) or (err) { << "{\"ok\":true,\"cmd\":\"wait\"}" }
+        $w := ms
+        if w < 10 { w = 100 }
+        if w > 10000 { w = 10000 }
+        time.sleep(w * 1000000)
+        << "{\"ok\":true,\"cmd\":" + json.quote(&line) + "}"
+    }
+    if verb == "home" {
+        ok := h.ctl.home(&rt.topic, rt.slot, &rt.home)
+        h.traces.record(flow.Step{action: "home", target_text: "", value: "", x: 0, y: 0, x2: 0, y2: 0, before: []string{}, after: []string{}})
+        h.append_log("[" + rt.id + "] cmd: home -> " + rt.topic + "#" + strconv.itoa(rt.slot))
+        << ok_json(&line, ok)
+    }
+    if verb == "back" {
+        ok := h.ctl.back(&rt.topic, rt.slot)
+        h.traces.record(flow.Step{action: "back", target_text: "", value: "", x: 0, y: 0, x2: 0, y2: 0, before: []string{}, after: []string{}})
+        h.append_log("[" + rt.id + "] cmd: back -> " + rt.topic + "#" + strconv.itoa(rt.slot))
+        << ok_json(&line, ok)
+    }
+    if verb == "spotlight" {
+        ok := h.ctl.spotlight(&rt.topic, rt.slot)
+        h.traces.record(flow.Step{action: "spotlight", target_text: "", value: "", x: 0, y: 0, x2: 0, y2: 0, before: []string{}, after: []string{}})
+        h.append_log("[" + rt.id + "] cmd: spotlight (Cmd+Space)")
+        << ok_json(&line, ok)
+    }
+    if verb == "focus_url" {
+        ok := h.ctl.focus_url(&rt.topic, rt.slot)
+        h.traces.record(flow.Step{action: "focus_url", target_text: "", value: "", x: 0, y: 0, x2: 0, y2: 0, before: []string{}, after: []string{}})
+        h.append_log("[" + rt.id + "] cmd: focus_url (Cmd+L)")
+        << ok_json(&line, ok)
+    }
+    if verb == "new_tab" {
+        ok := h.ctl.new_tab(&rt.topic, rt.slot)
+        h.append_log("[" + rt.id + "] cmd: new_tab (Cmd+T)")
+        << ok_json(&line, ok)
+    }
+    if verb == "clear_input" {
+        ok := h.ctl.clear_focused_input(&rt.topic, rt.slot)
+        h.append_log("[" + rt.id + "] cmd: clear_input (Cmd+A + Backspace)")
+        << ok_json(&line, ok)
+    }
+    if verb == "release_all" || verb == "stop" {
+        ok := h.ctl.release_all(&rt.topic, rt.slot)
+        h.append_log("[" + rt.id + "] cmd: release_all")
+        << ok_json(&line, ok)
+    }
+    if verb == "swipe_left" {
+        ok := h.ctl.swipe(&rt.topic, rt.slot, 28000, 16384, 4000, 16384, 240)
+        h.traces.record(flow.Step{action: "swipe", target_text: "", value: "", x: 28000, y: 16384, x2: 4000, y2: 16384, before: []string{}, after: []string{}})
+        h.append_log("[" + rt.id + "] cmd: swipe_left")
+        << ok_json(&line, ok)
+    }
+    if verb == "swipe_right" {
+        ok := h.ctl.swipe(&rt.topic, rt.slot, 4000, 16384, 28000, 16384, 240)
+        h.traces.record(flow.Step{action: "swipe", target_text: "", value: "", x: 4000, y: 16384, x2: 28000, y2: 16384, before: []string{}, after: []string{}})
+        h.append_log("[" + rt.id + "] cmd: swipe_right")
+        << ok_json(&line, ok)
+    }
+    if verb == "scroll_down" {
+        ok := h.ctl.swipe(&rt.topic, rt.slot, 16384, 24000, 16384, 8000, 300)
+        h.traces.record(flow.Step{action: "swipe", target_text: "", value: "", x: 16384, y: 24000, x2: 16384, y2: 8000, before: []string{}, after: []string{}})
+        h.append_log("[" + rt.id + "] cmd: scroll_down")
+        << ok_json(&line, ok)
+    }
+    if verb == "scroll_up" {
+        ok := h.ctl.swipe(&rt.topic, rt.slot, 16384, 8000, 16384, 24000, 300)
+        h.traces.record(flow.Step{action: "swipe", target_text: "", value: "", x: 16384, y: 8000, x2: 16384, y2: 24000, before: []string{}, after: []string{}})
+        h.append_log("[" + rt.id + "] cmd: scroll_up")
+        << ok_json(&line, ok)
+    }
+    if verb == "tap_dock" {
+        d_idx := strconv.atoi(&rest) or (err) { << error_message("bad_dock_index") }
+        dx := dock_x_for_index(d_idx)
+        dy := 30300
+        ok := h.ctl.tap(&rt.topic, rt.slot, dx, dy)
+        h.traces.record(flow.Step{action: "tap", target_text: "", value: "", x: dx, y: dy, x2: 0, y2: 0, before: []string{}, after: []string{}})
+        h.append_log("[" + rt.id + "] cmd: tap_dock " + strconv.itoa(d_idx) + " @ (" + strconv.itoa(dx) + "," + strconv.itoa(dy) + ")")
+        $oks := "false"
+        if ok { oks = "true" }
+        << "{\"ok\":" + oks + ",\"cmd\":" + json.quote(&line) + ",\"x\":" + strconv.itoa(dx) + ",\"y\":" + strconv.itoa(dy) + "}"
+    }
+    if verb == "tap" {
+        parts := strings.split(&rest, " ")
+        if parts.len >= 2 {
+            tx := strconv.atoi(&parts[0]) or (err) { << error_message("bad_coords") }
+            ty := strconv.atoi(&parts[1]) or (err) { << error_message("bad_coords") }
+            ok := h.ctl.tap(&rt.topic, rt.slot, tx, ty)
+            h.traces.record(flow.Step{action: "tap", target_text: "", value: "", x: tx, y: ty, x2: 0, y2: 0, before: []string{}, after: []string{}})
+            h.append_log("[" + rt.id + "] cmd: tap (" + strconv.itoa(tx) + "," + strconv.itoa(ty) + ")")
+            $oks := "false"
+            if ok { oks = "true" }
+            << "{\"ok\":" + oks + ",\"cmd\":" + json.quote(&line) + ",\"x\":" + strconv.itoa(tx) + ",\"y\":" + strconv.itoa(ty) + "}"
+        }
+        << error_message("bad_coords")
+    }
+    if verb == "double_tap" {
+        parts := strings.split(&rest, " ")
+        if parts.len >= 2 {
+            tx := strconv.atoi(&parts[0]) or (err) { << error_message("bad_coords") }
+            ty := strconv.atoi(&parts[1]) or (err) { << error_message("bad_coords") }
+            ok := h.ctl.double_tap(&rt.topic, rt.slot, tx, ty)
+            h.append_log("[" + rt.id + "] cmd: double_tap (" + strconv.itoa(tx) + "," + strconv.itoa(ty) + ")")
+            << ok_json(&line, ok)
+        }
+        << error_message("bad_coords")
+    }
+    if verb == "long_press" {
+        parts := strings.split(&rest, " ")
+        if parts.len >= 2 {
+            tx := strconv.atoi(&parts[0]) or (err) { << error_message("bad_coords") }
+            ty := strconv.atoi(&parts[1]) or (err) { << error_message("bad_coords") }
+            $dur := 650
+            if parts.len >= 3 {
+                d := strconv.atoi(&parts[2]) or (err) { << error_message("bad_duration") }
+                if d > 0 { dur = d }
+            }
+            ok := h.ctl.long_press(&rt.topic, rt.slot, tx, ty, dur)
+            h.append_log("[" + rt.id + "] cmd: long_press (" + strconv.itoa(tx) + "," + strconv.itoa(ty) + ") " + strconv.itoa(dur) + "ms")
+            << ok_json(&line, ok)
+        }
+        << error_message("bad_coords")
+    }
+    if verb == "swipe" {
+        parts := strings.split(&rest, " ")
+        if parts.len >= 4 {
+            x1 := strconv.atoi(&parts[0]) or (err) { << error_message("bad_coords") }
+            y1 := strconv.atoi(&parts[1]) or (err) { << error_message("bad_coords") }
+            x2 := strconv.atoi(&parts[2]) or (err) { << error_message("bad_coords") }
+            y2 := strconv.atoi(&parts[3]) or (err) { << error_message("bad_coords") }
+            $dur := 260
+            if parts.len >= 5 {
+                d := strconv.atoi(&parts[4]) or (err) { << error_message("bad_duration") }
+                if d > 0 { dur = d }
+            }
+            ok := h.ctl.swipe(&rt.topic, rt.slot, x1, y1, x2, y2, dur)
+            h.traces.record(flow.Step{action: "swipe", target_text: "", value: "", x: x1, y: y1, x2: x2, y2: y2, before: []string{}, after: []string{}})
+            h.append_log("[" + rt.id + "] cmd: swipe (" + strconv.itoa(x1) + "," + strconv.itoa(y1) + ")->(" + strconv.itoa(x2) + "," + strconv.itoa(y2) + ")")
+            << ok_json(&line, ok)
+        }
+        << error_message("bad_coords")
+    }
+    if verb == "input" {
+        ok := h.ctl.type_ascii_or_paste(&rt.topic, rt.slot, &rest)
+        h.traces.record(flow.Step{action: "input", target_text: "", value: rest + "", x: 0, y: 0, x2: 0, y2: 0, before: []string{}, after: []string{}})
+        h.append_log("[" + rt.id + "] cmd: input \"" + rest + "\"")
+        << ok_json(&line, ok)
+    }
+    if verb == "submit" {
+        ok := h.ctl.type_ascii_or_paste(&rt.topic, rt.slot, &rest)
+        time.sleep(160000000)
+        _ := h.ctl.send_key_code(&rt.topic, rt.slot, 0, 40)
+        time.sleep(160000000)
+        _ := h.ctl.send_key_code(&rt.topic, rt.slot, 0, 40)
+        h.traces.record(flow.Step{action: "input", target_text: "", value: rest + "", x: 0, y: 0, x2: 0, y2: 0, before: []string{}, after: []string{}})
+        h.append_log("[" + rt.id + "] cmd: submit \"" + rest + "\" + Enter")
+        << ok_json(&line, ok)
+    }
+    if verb == "paste" {
+        ok := h.ctl.paste_shortcut(&rt.topic, rt.slot, &rest)
+        h.append_log("[" + rt.id + "] cmd: paste \"" + rest + "\"")
+        << ok_json(&line, ok)
+    }
+    if verb == "key" {
+        code := key_name_to_hid(&rest)
+        ok := h.ctl.send_key_code(&rt.topic, rt.slot, 0, code)
+        h.append_log("[" + rt.id + "] cmd: key " + rest)
+        << ok_json(&line, ok)
+    }
+    if verb == "shortcut" {
+        ok := exec_shortcut_name(h, rt, &rest)
+        h.append_log("[" + rt.id + "] cmd: shortcut " + rest)
+        << ok_json(&line, ok)
+    }
+    if verb == "consumer" {
+        mask := consumer_name_to_mask(&rest)
+        ok := h.ctl.send_consumer(&rt.topic, rt.slot, mask)
+        h.append_log("[" + rt.id + "] cmd: consumer " + rest)
+        << ok_json(&line, ok)
+    }
+    if verb == "open_app" {
+        ok := h.ctl.spotlight(&rt.topic, rt.slot)
+        time.sleep(350000000)
+        _ := h.ctl.type_ascii_or_paste(&rt.topic, rt.slot, &rest)
+        time.sleep(250000000)
+        _ := h.ctl.send_key_code(&rt.topic, rt.slot, 0, 40)
+        time.sleep(250000000)
+        _ := h.ctl.send_key_code(&rt.topic, rt.slot, 0, 40)
+        h.append_log("[" + rt.id + "] open_app via spotlight: " + rest)
+        $oks := "false"
+        if ok { oks = "true" }
+        << "{\"ok\":" + oks + ",\"cmd\":" + json.quote(&line) + ",\"via\":\"spotlight\"}"
+    }
+    << error_message("unknown_command")
+}
+
+pub fn exec_command_line(h &Hub, rt &RouteTarget, pipeline &string, id int, now_ms int) string {
+    start_stop := h.stop_seq()
+    normalized := strings.replace(pipeline, "\n", "&&", -1)
+    parts := strings.split(&normalized, "&&")
+    $results := "["
+    $count := 0
+    for i in 0:parts.len {
+        if h.stop_seq() != start_stop {
+            <-
+        }
+        p := trim_ws(&parts[i])
+        if p.len == 0 {
+            ->
+        }
+        if count > 0 {
+            results.push_str(",")
+            time.sleep(250000000)
+        }
+        res := exec_single_cmd(h, rt, &p, id + (i + 1) * 30, now_ms + i * 300)
+        results.push_str(res)
+        count += 1
+    }
+    results.push_str("]")
+    << "{\"op\":\"exec_result\",\"device\":" + json.quote(&rt.id) + ",\"steps\":" + strconv.itoa(count) + ",\"results\":" + results + "}"
+}
+
+pub fn exec_macro_by_name(h &Hub, rt &RouteTarget, name &string, arg &string, id int, now_ms int) string {
+    m := h.traces.find_macro(name)
+    if m.name.len == 0 {
+        fl := h.traces.load_flow(name)
+        if fl.steps.len == 0 {
+            << error_message("macro_not_found")
+        }
+        for i in 0:fl.steps.len {
+            cmd := flow.step_to_cmd(&fl.steps[i])
+            _ := exec_single_cmd(h, rt, &cmd, id + (i + 1) * 30, now_ms)
+            time.sleep(350000000)
+        }
+        << "{\"op\":\"macro_result\",\"device\":" + json.quote(&rt.id) + ",\"macro\":" + json.quote(name) + ",\"steps\":" + strconv.itoa(fl.steps.len) + "}"
+    }
+    h.append_log("[" + rt.id + "] ▶ 执行操作宏 macro:" + m.name + " (" + *arg + ")")
+    $results := "["
+    for i in 0:m.commands.len {
+        if i > 0 {
+            results.push_str(",")
+        }
+        raw_c := m.commands[i] + ""
+        expanded := replace_arg_placeholder(&raw_c, arg)
+        r := exec_command_line(h, rt, &expanded, id + (i + 1) * 50, now_ms + i * 400)
+        results.push_str(r)
+    }
+    results.push_str("]")
+    << "{\"op\":\"macro_result\",\"device\":" + json.quote(&rt.id) + ",\"macro\":" + json.quote(&m.name) + ",\"steps\":" + strconv.itoa(m.commands.len) + ",\"results\":" + results + "}"
+}
+
+fn run_exec_bg(h Hub, rt RouteTarget, cmd_line string, base_id int, now_ms int) {
+    _ := exec_command_line(&h, &rt, &cmd_line, base_id, now_ms)
+}
+
+fn run_batch_exec_bg(h Hub, targets []RouteTarget, mode string, cmd_line string, id int, now_ms int) {
+    if mode == "broadcast" || mode.len == 0 {
+        for i in 0:targets.len {
+            rt := targets[i].clone()
+            xu run_exec_bg(h.clone(), rt, cmd_line + "", id + (i + 1) * 1000, now_ms)
+        }
+        <<
+    }
+    for i in 0:targets.len {
+        rt := targets[i].clone()
+        _ := exec_command_line(&h, &rt, &cmd_line, id + (i + 1) * 1000, now_ms)
+    }
+}
+
+pub fn cluster_state_message(h &Hub) string {
+    h.reconcile_links()
+    targets := h.all_targets()
+    nodes := h.ctl.nodes()
+    peers := h.ctl.peers()
+    macros := h.traces.list_macros()
+    logs := h.logs()
+    $auto := "false"
+    if h.auto_link() {
+        auto = "true"
+    }
+    $out := "{\"op\":\"cluster_state\",\"auto_link\":" + auto + ",\"devices\":["
+    for i in 0:targets.len {
+        if i > 0 { out.push_str(",") }
+        t := targets[i].clone()
+        out.push_str("{\"id\":" + json.quote(&t.id) + ",\"phone_name\":" + json.quote(&t.phone_name) + ",\"mqtt_topic\":" + json.quote(&t.topic) + ",\"ble_slot\":" + strconv.itoa(t.slot) + ",\"ble_peer\":" + json.quote(&t.ble_peer) + ",\"group\":" + json.quote(&t.group) + "}")
+    }
+    out.push_str("],\"esp_nodes\":[")
+    for i in 0:nodes.len {
+        if i > 0 { out.push_str(",") }
+        nd := nodes[i].clone_node()
+        $on := "false"
+        if nd.online { on = "true" }
+        $adv := "false"
+        if nd.advertising { adv = "true" }
+        out.push_str("{\"mqtt_topic\":" + json.quote(&nd.mqtt_topic) + ",\"online\":" + on + ",\"connected_count\":" + strconv.itoa(nd.connected_count) + ",\"advertising\":" + adv + ",\"peers\":[")
+        for j in 0:nd.peers.len {
+            if j > 0 { out.push_str(",") }
+            p := nd.peers[j].clone_peer()
+            $rdy := "false"
+            if p.ready { rdy = "true" }
+            out.push_str("{\"slot\":" + strconv.itoa(p.slot) + ",\"bda\":" + json.quote(&p.bda) + ",\"name\":" + json.quote(&p.name) + ",\"ready\":" + rdy + "}")
+        }
+        out.push_str("]}")
+    }
+    out.push_str("],\"ble_peers\":[")
+    for i in 0:peers.len {
+        if i > 0 { out.push_str(",") }
+        $rdy := "false"
+        if peers[i].ready { rdy = "true" }
+        out.push_str("{\"mqtt_topic\":" + json.quote(&peers[i].mqtt_topic) + ",\"slot\":" + strconv.itoa(peers[i].slot) + ",\"bda\":" + json.quote(&peers[i].bda) + ",\"name\":" + json.quote(&peers[i].name) + ",\"ready\":" + rdy + "}")
+    }
+    $pjob := h.prov_job()
+    $pres := h.prov_result()
+    $pres_json := "null"
+    if pres.len > 0 { pres_json = pres + "" }
+    out.push_str("],\"macros\":" + flow.macros_array_json(&macros) + ",\"provision_job\":" + json.quote(&pjob) +
+        ",\"provision_result\":" + pres_json + ",\"logs\":[")
+    for i in 0:logs.len {
+        if i > 0 { out.push_str(",") }
+        lg := logs[i]
+        out.push_str(json.quote(&lg))
+    }
+    out.push_str("]}")
+    << out
+}
+
+pub fn devices_message(h &Hub) string {
+    targets := h.all_targets()
+    $out := "{\"op\":\"devices\",\"devices\":["
+    for i in 0:targets.len {
+        if i > 0 { out.push_str(",") }
+        t := targets[i].clone()
+        out.push_str("{\"id\":" + json.quote(&t.id) + ",\"phone_name\":" + json.quote(&t.phone_name) + ",\"mqtt_topic\":" + json.quote(&t.topic) + ",\"ble_slot\":" + strconv.itoa(t.slot) + ",\"ble_peer\":" + json.quote(&t.ble_peer) + ",\"group\":" + json.quote(&t.group) + "}")
+    }
+    out.push_str("]}")
+    << out
+}
+
+fn default_topic_for(h &Hub, req_topic &string) string {
+    if req_topic.len > 0 {
+        << *req_topic + ""
+    }
+    cfg := h.get_config()
+    if cfg.default_topic.len > 0 {
+        << cfg.default_topic + ""
+    }
+    << "xu/esp32/cyd"
+}
+
+pub fn answer(h &Hub, id int, raw &string, now_ms int) string {
+    r := parse_request(raw) or (err) {
+        << error_message("bad_request")
+    }
+    if r.op == "devices" {
+        << devices_message(h)
+    }
+    if r.op == "cluster_state" || r.op == "studio_state" || r.op == "esp_nodes" {
+        << cluster_state_message(h)
+    }
+    if r.op == "auto_link" {
+        h.set_auto_link(r.submit)
+        $en := "false"
+        if h.auto_link() { en = "true" }
+        h.append_log("auto_link -> " + en)
+        << "{\"op\":\"ok\",\"action\":\"auto_link\",\"enabled\":" + en + "}"
+    }
+    if r.op == "ble_status" {
+        if r.text.len > 0 {
+            t := default_topic_for(h, &r.mqtt_topic)
+            h.ctl.update_peers_from_status(&t, &r.text)
+        }
+        << cluster_state_message(h)
+    }
+    if r.op == "ble_adv" {
+        t := default_topic_for(h, &r.mqtt_topic)
+        ok := h.ctl.set_advertising(&t, r.submit)
+        $oks := "false"
+        if ok { oks = "true" }
+        << "{\"op\":\"ok\",\"action\":\"ble_adv\",\"mqtt_topic\":" + json.quote(&t) + ",\"ok\":" + oks + "}"
+    }
+    if r.op == "wait" {
+        $ms := r.ms
+        if ms <= 0 { ms = r.duration_ms }
+        if ms > 10000 { ms = 10000 }
+        if ms > 0 { time.sleep(ms * 1000000) }
+        << "{\"op\":\"ok\",\"action\":\"wait\",\"ms\":" + strconv.itoa(ms) + "}"
+    }
+    if r.op == "ble_disconnect" {
+        t := default_topic_for(h, &r.mqtt_topic)
+        ok := h.ctl.disconnect_peer(&t, r.ble_slot)
+        $oks := "false"
+        if ok { oks = "true" }
+        << "{\"op\":\"ok\",\"action\":\"ble_disconnect\",\"mqtt_topic\":" + json.quote(&t) + ",\"ble_slot\":" + strconv.itoa(r.ble_slot) + ",\"ok\":" + oks + "}"
+    }
+    if r.op == "provision_scan" {
+        $job := "{\"id\":\"" + strconv.itoa(id) + "\",\"action\":\"scan\"}"
+        h.set_prov_job(job + "")
+        h.append_log("[配网] 已请求扫描 XuPlay-Setup-* 蓝牙设备")
+        << "{\"op\":\"ok\",\"action\":\"provision_scan\",\"job\":" + json.quote(&job) + "}"
+    }
+    if r.op == "provision_write" {
+        if r.device.len == 0 || r.ssid.len == 0 {
+            << error_message("bad_request")
+        }
+        $job := "{\"id\":\"" + strconv.itoa(id) + "\",\"action\":\"write\",\"device\":" + json.quote(&r.device) +
+            ",\"ssid\":" + json.quote(&r.ssid) + ",\"pass\":" + json.quote(&r.pass) +
+            ",\"mqtt_uri\":" + json.quote(&r.mqtt_uri) + ",\"root\":" + json.quote(&r.root) +
+            ",\"name\":" + json.quote(&r.name) + "}"
+        h.set_prov_job(job + "")
+        h.append_log("[配网] 已下发配网包给 " + r.device + " (SSID " + r.ssid + ")")
+        << "{\"op\":\"ok\",\"action\":\"provision_write\",\"job\":" + json.quote(&job) + "}"
+    }
+    if r.op == "provision_result" {
+        h.set_prov_result(r.raw + "")
+        h.append_log("[配网] 收到配网结果回执")
+        << "{\"op\":\"ok\",\"action\":\"provision_result\"}"
+    }
+    if r.op == "provision_status" {
+        res := h.prov_result()
+        if res.len == 0 {
+            << "{\"op\":\"provision_status\",\"result\":null}"
+        }
+        << "{\"op\":\"provision_status\",\"result\":" + res + "}"
+    }
+    if r.op == "esp_reset_wifi" {
+        t := default_topic_for(h, &r.mqtt_topic)
+        ok := h.ctl.reset_wifi(&t)
+        $oks := "false"
+        if ok { oks = "true" }
+        h.append_log("[ESP32] 已请求 " + t + " 清空 Wi-Fi 配置并回到蓝牙配网模式")
+        << "{\"op\":\"ok\",\"action\":\"esp_reset_wifi\",\"mqtt_topic\":" + json.quote(&t) + ",\"ok\":" + oks + "}"
+    }
+    if r.op == "macro_list" {
+        macros := h.traces.list_macros()
+        << "{\"op\":\"macro_list\",\"macros\":" + flow.macros_array_json(&macros) + "}"
+    }
+    if r.op == "macro_save" {
+        if r.text.len == 0 {
+            n := h.traces.save_flow(&r.name)
+            h.append_log("[操作宏] 已将当前录制轨迹保存为宏 macro:" + r.name + " (" + strconv.itoa(n) + " 步)")
+            << "{\"op\":\"ok\",\"action\":\"macro_save\",\"name\":" + json.quote(&r.name) + ",\"steps\":" + strconv.itoa(n) + "}"
+        }
+        norm := strings.replace(&r.text, "\n", "&&", -1)
+        parts := strings.split(&norm, "&&")
+        $cmds := []string{}
+        for p in parts {
+            c := trim_ws(&p)
+            if c.len > 0 { cmds.push(c) }
+        }
+        $title := r.goal + ""
+        if title.len == 0 { title = r.name + "" }
+        $cmds_len := cmds.len
+        h.traces.upsert_macro(flow.MacroDef{
+            name: r.name + "",
+            title: title,
+            desc: r.mode + "",
+            params: r.key + "",
+            builtin: false,
+            commands: cmds
+        })
+        h.append_log("[操作宏] 已保存自定义宏 macro:" + r.name + " (" + strconv.itoa(cmds_len) + " 步)")
+        << "{\"op\":\"ok\",\"action\":\"macro_save\",\"name\":" + json.quote(&r.name) + ",\"steps\":" + strconv.itoa(cmds_len) + "}"
+    }
+    if r.op == "trace_to_macro" {
+        n := h.traces.save_flow_titled(&r.name, r.title + "", r.desc + "")
+        h.append_log("[" + r.device + "] 已将操作轨迹保存为宏 macro:" + r.name + " (" + strconv.itoa(n) + " 步)")
+        << "{\"op\":\"ok\",\"action\":\"trace_to_macro\",\"name\":" + json.quote(&r.name) + ",\"steps\":" + strconv.itoa(n) + "}"
+    }
+    if r.op == "macro_delete" {
+        ok := h.traces.delete_macro(&r.name)
+        $oks := "false"
+        if ok { oks = "true" }
+        << "{\"op\":\"ok\",\"action\":\"macro_delete\",\"ok\":" + oks + "}"
+    }
+    if r.op == "trace_clear" {
+        h.traces.clear()
+        h.append_log("[轨迹录制] 已清空当前录制轨迹")
+        << "{\"op\":\"ok\",\"action\":\"trace_clear\"}"
+    }
+    if r.op == "trace_save" {
+        n := h.traces.save_flow(&r.name)
+        h.append_log("[轨迹录制] 已保存录制为宏 macro:" + r.name + " (" + strconv.itoa(n) + " 步)")
+        << "{\"op\":\"ok\",\"action\":\"trace_save\",\"steps\":" + strconv.itoa(n) + "}"
+    }
+    if r.op == "stop" && r.device.len == 0 {
+        _ := h.bump_stop()
+        targets := h.all_targets()
+        for t in targets {
+            _ := h.ctl.release_all(&t.topic, t.slot)
+        }
+        h.append_log("[全局急停] 已中止所有任务并向所有 ESP32 节点发送 release.all")
+        << "{\"op\":\"ok\",\"action\":\"stop_all\"}"
+    }
+    if r.op == "batch_exec" || r.op == "batch" {
+        $targets := []RouteTarget{}
+        if r.devices.len == 0 {
+            targets = h.all_targets()
+        } else {
+            for dev_id in r.devices {
+                t := h.resolve_target(&dev_id)
+                if t.found {
+                    targets.push(t.clone())
+                }
+            }
+        }
+        if targets.len == 0 {
+            << error_message("no_device")
+        }
+        $cmd_line := r.text + ""
+        if cmd_line.len == 0 { cmd_line = r.goal + "" }
+        n_targets := targets.len
+        h.append_log("[批量命令] 目标设备数=" + strconv.itoa(n_targets) + " 命令=" + cmd_line)
+        $cmd_copy := cmd_line + ""
+        xu run_batch_exec_bg(h.clone(), targets, r.mode + "", cmd_line, id, now_ms)
+        << "{\"op\":\"batch_started\",\"devices\":" + strconv.itoa(n_targets) + ",\"cmd\":" + json.quote(&cmd_copy) + "}"
+    }
+
+    if r.op == "device_set" || r.op == "device_bind" || r.op == "bind_slot" {
+        $rt := h.resolve_target(&r.device)
+        if !rt.found && r.device.len == 0 {
+            << error_message("no_device")
+        }
+        $slot := r.ble_slot
+        $peer := r.ble_peer + ""
+        $topic := r.mqtt_topic + ""
+        if r.op == "bind_slot" && slot < 0 {
+            << error_message("bad_request")
+        }
+        if slot < 0 && rt.found {
+            slot = rt.slot
+        }
+        if slot < 0 {
+            slot = 0
+        }
+        if topic.len == 0 && rt.found {
+            topic = rt.topic + ""
+        }
+        if topic.len == 0 {
+            topic = default_topic_for(h, &r.mqtt_topic)
+        }
+        if peer.len == 0 && rt.found {
+            peer = rt.ble_peer + ""
+        }
+        $dev_id := r.device + ""
+        if dev_id.len == 0 && rt.found {
+            dev_id = rt.id + ""
+        }
+        $pname := r.name + ""
+        if pname.len == 0 && rt.found {
+            pname = rt.phone_name + ""
+        }
+        h.upsert_device_config(&dev_id, &pname, &topic, slot, &peer, &r.mode)
+        h.append_log("[" + dev_id + "] 已绑定 ESP32 节点 " + topic + " Slot #" + strconv.itoa(slot))
+        << "{\"op\":\"ok\",\"action\":" + json.quote(&r.op) + ",\"device\":" + json.quote(&dev_id) + ",\"mqtt_topic\":" + json.quote(&topic) + ",\"ble_slot\":" + strconv.itoa(slot) + "}"
+    }
+
+    rt := h.resolve_target(&r.device)
+    if !rt.found {
+        << error_message("no_device")
+    }
+
+    if r.op == "exec" {
+        $cmd_line := r.text + ""
+        if cmd_line.len == 0 { cmd_line = r.goal + "" }
+        << exec_command_line(h, &rt, &cmd_line, id, now_ms)
+    }
+    if r.op == "macro_run" || r.op == "run_flow" {
+        << exec_macro_by_name(h, &rt, &r.name, &r.text, id, now_ms)
+    }
+    if r.op == "screen_size" {
+        if r.w > 0 && r.h > 0 {
+            ok := h.ctl.set_screen_size(&rt.topic, rt.slot, r.w, r.h)
+            $oks := "false"
+            if ok { oks = "true" }
+            << "{\"op\":\"ok\",\"action\":\"screen_size\",\"ok\":" + oks + ",\"w\":" + strconv.itoa(r.w) + ",\"h\":" + strconv.itoa(r.h) + "}"
+        }
+        << error_message("bad_request")
+    }
+    if r.op == "mouse_down" {
+        if r.w > 0 && r.h > 0 {
+            _ := h.ctl.set_screen_size(&rt.topic, rt.slot, r.w, r.h)
+        }
+        ok := h.ctl.mouse_event(&rt.topic, rt.slot, 1, r.x, r.y)
+        $oks := "false"
+        if ok { oks = "true" }
+        << "{\"op\":\"ok\",\"action\":\"mouse_down\",\"ok\":" + oks + "}"
+    }
+    if r.op == "mouse_move" {
+        $b := r.btn
+        if b <= 0 && r.submit { b = 1 }
+        ok := h.ctl.mouse_event(&rt.topic, rt.slot, b, r.x, r.y)
+        $oks := "false"
+        if ok { oks = "true" }
+        << "{\"op\":\"ok\",\"action\":\"mouse_move\",\"ok\":" + oks + "}"
+    }
+    if r.op == "mouse_up" {
+        ok := h.ctl.mouse_event(&rt.topic, rt.slot, 0, r.x, r.y)
+        $oks := "false"
+        if ok { oks = "true" }
+        << "{\"op\":\"ok\",\"action\":\"mouse_up\",\"ok\":" + oks + "}"
+    }
+    if r.op == "key_event" {
+        ok := h.ctl.key_event(&rt.topic, rt.slot, r.down, r.mod, r.code)
+        $oks := "false"
+        if ok { oks = "true" }
+        << "{\"op\":\"ok\",\"action\":\"key_event\",\"ok\":" + oks + "}"
+    }
+    if r.op == "tap" {
+        ok := h.ctl.tap(&rt.topic, rt.slot, r.x, r.y)
+        h.traces.record(flow.Step{action: "tap", target_text: "", value: "", x: r.x, y: r.y, x2: 0, y2: 0, before: []string{}, after: []string{}})
+        h.append_log("[" + rt.id + "] tap (" + strconv.itoa(r.x) + "," + strconv.itoa(r.y) + ") -> " + rt.topic + "#" + strconv.itoa(rt.slot))
+        $oks := "false"
+        if ok { oks = "true" }
+        << "{\"op\":\"ok\",\"action\":\"tap\",\"ok\":" + oks + ",\"x\":" + strconv.itoa(r.x) + ",\"y\":" + strconv.itoa(r.y) + "}"
+    }
+    if r.op == "tap_dock" {
+        cmd := "tap_dock " + strconv.itoa(r.id)
+        << exec_single_cmd(h, &rt, &cmd, id, now_ms)
+    }
+    if r.op == "double_tap" {
+        ok := h.ctl.double_tap(&rt.topic, rt.slot, r.x, r.y)
+        $oks := "false"
+        if ok { oks = "true" }
+        << "{\"op\":\"ok\",\"action\":\"double_tap\",\"ok\":" + oks + "}"
+    }
+    if r.op == "long_press" {
+        ok := h.ctl.long_press(&rt.topic, rt.slot, r.x, r.y, r.duration_ms)
+        $oks := "false"
+        if ok { oks = "true" }
+        << "{\"op\":\"ok\",\"action\":\"long_press\",\"ok\":" + oks + "}"
+    }
+    if r.op == "swipe" {
+        ok := h.ctl.swipe(&rt.topic, rt.slot, r.x, r.y, r.x2, r.y2, r.duration_ms)
+        h.traces.record(flow.Step{action: "swipe", target_text: "", value: "", x: r.x, y: r.y, x2: r.x2, y2: r.y2, before: []string{}, after: []string{}})
+        h.append_log("[" + rt.id + "] swipe (" + strconv.itoa(r.x) + "," + strconv.itoa(r.y) + ")->(" + strconv.itoa(r.x2) + "," + strconv.itoa(r.y2) + ")")
+        $oks := "false"
+        if ok { oks = "true" }
+        << "{\"op\":\"ok\",\"action\":\"swipe\",\"ok\":" + oks + "}"
+    }
+    if r.op == "key" {
+        code := key_name_to_hid(&r.key)
+        ok := h.ctl.send_key_code(&rt.topic, rt.slot, 0, code)
+        $oks := "false"
+        if ok { oks = "true" }
+        << "{\"op\":\"ok\",\"action\":\"key\",\"ok\":" + oks + "}"
+    }
+    if r.op == "shortcut" {
+        ok := exec_shortcut_name(h, &rt, &r.key)
+        $oks := "false"
+        if ok { oks = "true" }
+        << "{\"op\":\"ok\",\"action\":\"shortcut\",\"ok\":" + oks + "}"
+    }
+    if r.op == "consumer" {
+        mask := consumer_name_to_mask(&r.key)
+        ok := h.ctl.send_consumer(&rt.topic, rt.slot, mask)
+        $oks := "false"
+        if ok { oks = "true" }
+        << "{\"op\":\"ok\",\"action\":\"consumer\",\"ok\":" + oks + "}"
+    }
+    if r.op == "input" || r.op == "submit" {
+        $sub := r.submit || r.op == "submit"
+        ok := h.ctl.type_ascii_or_paste(&rt.topic, rt.slot, &r.text)
+        if ok && sub {
+            time.sleep(160000000)
+            _ := h.ctl.send_key_code(&rt.topic, rt.slot, 0, 40)
+            time.sleep(160000000)
+            _ := h.ctl.send_key_code(&rt.topic, rt.slot, 0, 40)
+        }
+        h.traces.record(flow.Step{action: "input", target_text: "", value: r.text + "", x: 0, y: 0, x2: 0, y2: 0, before: []string{}, after: []string{}})
+        h.append_log("[" + rt.id + "] input \"" + r.text + "\"")
+        $oks := "false"
+        if ok { oks = "true" }
+        << "{\"op\":\"ok\",\"action\":\"input\",\"ok\":" + oks + "}"
+    }
+    if r.op == "paste" {
+        ok := h.ctl.paste_shortcut(&rt.topic, rt.slot, &r.text)
+        $oks := "false"
+        if ok { oks = "true" }
+        << "{\"op\":\"ok\",\"action\":\"paste\",\"ok\":" + oks + "}"
+    }
+    if r.op == "clear_input" {
+        ok := h.ctl.clear_focused_input(&rt.topic, rt.slot)
+        $oks := "false"
+        if ok { oks = "true" }
+        << "{\"op\":\"ok\",\"action\":\"clear_input\",\"ok\":" + oks + "}"
+    }
+    if r.op == "focus_url" {
+        ok := h.ctl.focus_url(&rt.topic, rt.slot)
+        $oks := "false"
+        if ok { oks = "true" }
+        << "{\"op\":\"ok\",\"action\":\"focus_url\",\"ok\":" + oks + "}"
+    }
+    if r.op == "new_tab" {
+        ok := h.ctl.new_tab(&rt.topic, rt.slot)
+        $oks := "false"
+        if ok { oks = "true" }
+        << "{\"op\":\"ok\",\"action\":\"new_tab\",\"ok\":" + oks + "}"
+    }
+    if r.op == "spotlight" {
+        ok := h.ctl.spotlight(&rt.topic, rt.slot)
+        $oks := "false"
+        if ok { oks = "true" }
+        << "{\"op\":\"ok\",\"action\":\"spotlight\",\"ok\":" + oks + "}"
+    }
+    if r.op == "back" {
+        ok := h.ctl.back(&rt.topic, rt.slot)
+        h.traces.record(flow.Step{action: "back", target_text: "", value: "", x: 0, y: 0, x2: 0, y2: 0, before: []string{}, after: []string{}})
+        h.append_log("[" + rt.id + "] back")
+        $oks := "false"
+        if ok { oks = "true" }
+        << "{\"op\":\"ok\",\"action\":\"back\",\"ok\":" + oks + "}"
+    }
+    if r.op == "home" {
+        ok := h.ctl.home(&rt.topic, rt.slot, &rt.home)
+        h.traces.record(flow.Step{action: "home", target_text: "", value: "", x: 0, y: 0, x2: 0, y2: 0, before: []string{}, after: []string{}})
+        h.append_log("[" + rt.id + "] home")
+        $oks := "false"
+        if ok { oks = "true" }
+        << "{\"op\":\"ok\",\"action\":\"home\",\"ok\":" + oks + "}"
+    }
+    if r.op == "stop" {
+        ok := h.ctl.release_all(&rt.topic, rt.slot)
+        h.append_log("[" + rt.id + "] stop (release.all)")
+        $oks := "false"
+        if ok { oks = "true" }
+        << "{\"op\":\"ok\",\"action\":\"stop\",\"ok\":" + oks + "}"
+    }
+    if r.op == "push_file" {
+        $mode := r.mode + ""
+        if mode.len == 0 { mode = "clipboard" }
+        $ok := false
+        if r.path.len > 0 {
+            ok = h.xfer.stage_file(&rt.id, &r.path, &mode)
+            h.append_log("[" + rt.id + "] 推送文件 " + r.path + " (" + mode + ")")
+        } else if r.text.len > 0 {
+            ok = h.xfer.stage_text(&rt.id, &r.text)
+            _ := h.ctl.paste_shortcut(&rt.topic, rt.slot, &r.text)
+            h.append_log("[" + rt.id + "] 推送文本并粘贴")
+        }
+        $oks := "false"
+        if ok { oks = "true" }
+        << "{\"op\":\"ok\",\"action\":\"push_file\",\"ok\":" + oks + ",\"transfer_port\":" + strconv.itoa(h.xfer.port) + "}"
+    }
+    if r.op == "pull_file" {
+        out_path := h.xfer.dir() + "/upload_latest.bin"
+        << "{\"op\":\"ok\",\"action\":\"pull_file\",\"saved\":" + json.quote(&out_path) + "}"
+    }
+    << error_message("bad_request")
+}

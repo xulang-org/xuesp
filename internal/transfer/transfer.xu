@@ -1,0 +1,111 @@
+@internal/transfer
+
+#os
+#strconv
+#strings
+#encoding/json
+
+pub struct TransferItem {
+    pub device string
+    pub mode string
+    pub filename string
+    pub body string
+    pub ready bool
+}
+
+pub struct Hub {
+    pub port int
+    dir_box chan string
+    box chan []TransferItem
+}
+
+pub fn new_hub(port int, dir string) Hub {
+    dir_box := chan string{cap: 1}
+    dir_box <- dir + ""
+    box := chan []TransferItem{cap: 1}
+    box <- []TransferItem{}
+    << Hub{port: port, dir_box: dir_box, box: box}
+}
+
+pub fn (h &Hub) clone() Hub {
+    << Hub{port: h.port, dir_box: h.dir_box, box: h.box}
+}
+
+pub fn (h &Hub) dir() string {
+    d := <-h.dir_box
+    out := d + ""
+    h.dir_box <- d
+    << out
+}
+
+pub fn (it &TransferItem) clone() TransferItem {
+    << TransferItem{
+        device: it.device + "",
+        mode: it.mode + "",
+        filename: it.filename + "",
+        body: it.body + "",
+        ready: it.ready
+    }
+}
+
+pub fn (h &Hub) stage_file(device &string, path &string, mode &string) bool {
+    body := os.read(*path + "") or (err) {
+        << false
+    }
+    parts := strings.split(path, "/")
+    $fname := "payload.bin"
+    if parts.len > 0 {
+        fname = parts[parts.len - 1] + ""
+    }
+    list := <-h.box
+    $next := []TransferItem{}
+    for it in list {
+        if it.device != *device {
+            next.push(it.clone())
+        }
+    }
+    next.push(TransferItem{
+        device: *device + "",
+        mode: *mode + "",
+        filename: fname,
+        body: body,
+        ready: true
+    })
+    h.box <- next
+    << true
+}
+
+pub fn (h &Hub) stage_text(device &string, text &string) bool {
+    list := <-h.box
+    $next := []TransferItem{}
+    for it in list {
+        if it.device != *device {
+            next.push(it.clone())
+        }
+    }
+    next.push(TransferItem{
+        device: *device + "",
+        mode: "text",
+        filename: "clip.txt",
+        body: *text + "",
+        ready: true
+    })
+    h.box <- next
+    << true
+}
+
+pub fn (h &Hub) take(device &string) TransferItem {
+    list := <-h.box
+    $found := TransferItem{device: "", mode: "", filename: "", body: "", ready: false}
+    $next := []TransferItem{}
+    for i in 0:list.len {
+        it := list[i].clone()
+        if !found.ready && (device.len == 0 || it.device == *device) {
+            found = it.clone()
+        } else {
+            next.push(it.clone())
+        }
+    }
+    h.box <- next
+    << found
+}

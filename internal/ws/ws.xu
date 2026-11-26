@@ -1,0 +1,80 @@
+@internal/ws
+
+#errors
+#strings
+#net/websocket
+
+pub struct Msg {
+    pub opcode int
+    pub payload string
+    pub used int
+}
+
+pub fn header_end(buf &string) int {
+    i := strings.index_of(buf, "\r\n\r\n")
+    if i < 0 {
+        << -1
+    }
+    << i + 4
+}
+
+pub fn handshake(head &string) string {
+    $key := ""
+    for line in strings.split(head, "\r\n") {
+        lower := strings.to_lower(&line)
+        if strings.has_prefix(&lower, "sec-websocket-key:") {
+            v := line[18:line.len]
+            key = strings.trim_space(&v)
+        }
+    }
+    if key.len == 0 {
+        >> errors.new("ws: missing Sec-WebSocket-Key")
+    }
+    << "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + websocket.compute_accept_key(key) + "\r\n\r\n"
+}
+
+fn need_more() Msg {
+    << Msg{opcode: 0, payload: "", used: 0}
+}
+
+// next_msg decodes the first frame in buf; used == 0 means more bytes are needed.
+pub fn next_msg(buf &string) Msg {
+    if buf.len < 2 {
+        << need_more()
+    }
+    code := buf[1] & 127
+    $hdr := 2
+    $plen := code
+    if code == 126 {
+        if buf.len < 4 {
+            << need_more()
+        }
+        plen = ((buf[2] & 255) << 8) | (buf[3] & 255)
+        hdr = 4
+    } else if code == 127 {
+        if buf.len < 10 {
+            << need_more()
+        }
+        plen = 0
+        for i in 2:10 {
+            plen = (plen << 8) | (buf[i] & 255)
+        }
+        hdr = 10
+    }
+    if (buf[1] & 128) != 0 {
+        hdr = hdr + 4
+    }
+    if plen < 0 || plen > 1048576 {
+        >> errors.new("ws: frame too large")
+    }
+    if buf.len < hdr + plen {
+        << need_more()
+    }
+    one := buf[0:hdr + plen]
+    f := websocket.decode_frame(&one) or >>
+    << Msg{opcode: f.opcode, payload: f.payload + "", used: hdr + plen}
+}
+
+pub fn text_frame(s &string) string {
+    << websocket.encode_frame(true, websocket.OP_TEXT, s, false)
+}

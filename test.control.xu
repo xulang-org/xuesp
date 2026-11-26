@@ -1,0 +1,45 @@
+@main
+
+#internal/control
+#strings
+
+fn test_control_mqtt_packets() {
+    cid := "xuesp-1"
+    conn := control.encode_connect(&cid, 30)
+    assert(conn.len > 10 && (conn[0] & 255) == 0x10)
+    t := "xu/esp32/+/status"
+    sub := control.encode_subscribe(1, &t)
+    assert(sub.len > 6 && (sub[0] & 255) == 0x82)
+    pt := "xu/esp32/cyd/cmd"
+    pl := "{\"op\":\"hid.mouse\"}"
+    pub_pkt := control.encode_publish(&pt, &pl)
+    assert(pub_pkt.len > pl.len && (pub_pkt[0] & 255) == 0x30)
+    ping := control.encode_pingreq()
+    assert(ping.len == 2 && (ping[0] & 255) == 0xC0)
+}
+
+fn test_control_hid_reports_and_format() {
+    mr := control.mouse_report(1, 16384, 16384)
+    assert(mr == "[1,0,64,0,64]")
+    kr := control.keyboard_report(8, 25)
+    assert(kr == "[8,0,25,0,0,0,0,0]")
+    id := "tap-1"
+    op := "hid.mouse"
+    cmd := control.format_cmd(&id, &op, 2, &mr)
+    assert(strings.contains(&cmd, "\"target\":2"))
+    assert(strings.contains(&cmd, "\"report\":[1,0,64,0,64]"))
+}
+
+fn test_control_multi_node_status_update() {
+    c := control.new_controller("127.0.0.1", 1883, "xu/esp32/cyd")
+    t1 := "xu/esp32/node-1"
+    s1 := "{\"online\":true,\"advertising\":true,\"connected_count\":1,\"peers\":[{\"slot\":0,\"bda\":\"AA:BB:CC:DD:EE:01\",\"name\":\"iPhone-1\",\"ready\":true}]}"
+    t2 := "xu/esp32/node-2"
+    s2 := "{\"online\":true,\"advertising\":false,\"connected_count\":1,\"peers\":[{\"slot\":2,\"bda\":\"AA:BB:CC:DD:EE:02\",\"name\":\"iPhone-2\",\"ready\":true}]}"
+    c.update_peers_from_status(&t1, &s1)
+    c.update_peers_from_status(&t2, &s2)
+    nodes := c.nodes()
+    peers := c.peers()
+    assert(nodes.len == 2 && peers.len == 2)
+    assert(peers[0].mqtt_topic == "xu/esp32/node-1" && peers[1].mqtt_topic == "xu/esp32/node-2")
+}

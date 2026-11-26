@@ -1,0 +1,59 @@
+@internal/config
+
+#flag
+#errors
+
+pub struct Config {
+    pub state_dir string
+    pub ctl_port int
+    pub http_port int
+    pub mqtt_host string
+    pub mqtt_port int
+    pub help bool
+    pub headless bool
+}
+
+pub fn default_state_dir(home string) string {
+    if home.len == 0 {
+        << ".xuesp"
+    }
+    << home + "/.xuesp"
+}
+
+// parse_args parses CLI flags (args excludes argv[0]).
+pub fn parse_args(args []string, home string) Config {
+    $fs := flag.new_set("xuesp")
+    fs.define_string("state", default_state_dir(home), "directory for devices.toml, macros and flows")
+    fs.define_int("ctl-port", 8765, "local WebSocket control port on 127.0.0.1 (0 disables)")
+    fs.define_int("http-port", -1, "HTTP transfer and /mcp port (-1 uses devices.toml, 0 disables)")
+    fs.define_string("mqtt-host", "", "override MQTT broker host from devices.toml")
+    fs.define_int("mqtt-port", 0, "override MQTT broker port from devices.toml")
+    fs.define_bool("headless", false, "run controller without opening the macOS console window")
+    fs.define_bool("h", false, "show usage")
+    fs.parse(args) or >>
+
+    if fs.get_bool("h") {
+        fs.print_defaults()
+    }
+    ctl_port := fs.get_int("ctl-port")
+    if ctl_port < 0 || ctl_port > 65535 {
+        >> errors.new("ctl-port out of range")
+    }
+    http_port := fs.get_int("http-port")
+    if http_port < -1 || http_port > 65535 {
+        >> errors.new("http-port out of range")
+    }
+    mqtt_port := fs.get_int("mqtt-port")
+    if mqtt_port < 0 || mqtt_port > 65535 {
+        >> errors.new("mqtt-port out of range")
+    }
+    << Config{
+        state_dir: fs.get_string("state"),
+        ctl_port: ctl_port,
+        http_port: http_port,
+        mqtt_host: fs.get_string("mqtt-host"),
+        mqtt_port: mqtt_port,
+        help: fs.get_bool("h"),
+        headless: fs.get_bool("headless")
+    }
+}

@@ -1,0 +1,452 @@
+@internal/flow
+
+#os
+#strconv
+#strings
+#encoding/json
+
+pub struct Step {
+    pub action string
+    pub target_text string
+    pub value string
+    pub x int
+    pub y int
+    pub x2 int
+    pub y2 int
+    pub before []string
+    pub after []string
+}
+
+pub struct Flow {
+    pub name string
+    pub params []string
+    pub steps []Step
+}
+
+pub struct MacroDef {
+    pub name string
+    pub title string
+    pub desc string
+    pub params string
+    pub builtin bool
+    pub commands []string
+}
+
+pub struct TraceStore {
+    dir_box chan string
+    box chan []Step
+    macros_box chan []MacroDef
+}
+
+fn mkdir_quiet(dir string) {
+    os.mkdir_all(dir) or (err) { << }
+}
+
+pub fn (m &MacroDef) clone() MacroDef {
+    $cmds := []string{}
+    for c in m.commands {
+        cmds.push(c + "")
+    }
+    << MacroDef{
+        name: m.name + "",
+        title: m.title + "",
+        desc: m.desc + "",
+        params: m.params + "",
+        builtin: m.builtin,
+        commands: cmds
+    }
+}
+
+pub fn builtin_macros() []MacroDef {
+    $out := []MacroDef{}
+    out.push(MacroDef{
+        name: "open_url",
+        title: "打开网页 URL",
+        desc: "通过 Spotlight 打开 Safari，聚焦地址栏，输入网址并按回车访问",
+        params: "<url>",
+        builtin: true,
+        commands: ["spotlight", "wait 350", "submit Safari", "wait 700", "focus_url", "wait 350", "submit $${arg}"]
+    })
+    out.push(MacroDef{
+        name: "open_app",
+        title: "打开指定 App",
+        desc: "呼出 Spotlight 全局搜索并输入应用名回车打开",
+        params: "<app_name>",
+        builtin: true,
+        commands: ["open_app $${arg}"]
+    })
+    out.push(MacroDef{
+        name: "spotlight_search",
+        title: "全局 Spotlight 搜索",
+        desc: "发送 Cmd+Space 呼出 iOS 全局搜索框，清空旧内容并输入关键词回车搜索",
+        params: "<query>",
+        builtin: true,
+        commands: ["spotlight", "wait 350", "submit $${arg}"]
+    })
+    out.push(MacroDef{
+        name: "clear_and_submit",
+        title: "清空并输入提交",
+        desc: "全选清空当前已聚焦的输入框（Cmd+A + Backspace），输入新内容并按回车提交",
+        params: "<text>",
+        builtin: true,
+        commands: ["clear_input", "wait 120", "submit $${arg}"]
+    })
+    out.push(MacroDef{
+        name: "unlock_screen",
+        title: "唤醒并上滑解锁",
+        desc: "发送电源唤醒键，等待亮屏后从屏幕底部向上滑动解锁进入桌面",
+        params: "",
+        builtin: true,
+        commands: ["consumer power", "wait 600", "swipe 16384 28500 16384 5500 280"]
+    })
+    out.push(MacroDef{
+        name: "app_switcher",
+        title: "多任务后台切换",
+        desc: "从底部边缘缓慢上滑至屏幕中央悬停，呼出 iOS 多任务应用切换界面",
+        params: "",
+        builtin: true,
+        commands: ["swipe 16384 32200 16384 17000 500"]
+    })
+    out.push(MacroDef{
+        name: "kill_current_app",
+        title: "划掉关闭当前应用",
+        desc: "呼出 iOS 多任务切换界面，然后向上滑动将当前应用卡片关闭并回桌面",
+        params: "",
+        builtin: true,
+        commands: ["swipe 16384 32200 16384 17000 500", "wait 650", "swipe 16384 20000 16384 3000 240", "wait 400", "home"]
+    })
+    out.push(MacroDef{
+        name: "refresh_page",
+        title: "下拉刷新页面",
+        desc: "在当前页面从上向下滑动触发下拉刷新",
+        params: "",
+        builtin: true,
+        commands: ["swipe 16384 8500 16384 24500 280"]
+    })
+    << out
+}
+
+fn jstr(doc &json.Doc, n int) string {
+    if n < 0 || !doc.is_string(n) {
+        << ""
+    }
+    << doc.as_string(n) or (err) {
+        << ""
+    }
+}
+
+fn load_custom_macros(dir &string) []MacroDef {
+    $out := []MacroDef{}
+    path := *dir + "/macros.json"
+    raw := os.read(path) or (err) {
+        << out
+    }
+    doc := json.parse(&raw)
+    if !doc.ok() || !doc.is_list(doc.root()) {
+        << out
+    }
+    root := doc.root()
+    for i in 0:doc.count(root) {
+        en := doc.at(root, i)
+        if !doc.is_dict(en) {
+            ->
+        }
+        name := jstr(&doc, doc.get(en, "name"))
+        if name.len == 0 {
+            ->
+        }
+        title := jstr(&doc, doc.get(en, "title"))
+        desc := jstr(&doc, doc.get(en, "desc"))
+        params := jstr(&doc, doc.get(en, "params"))
+        cn := doc.get(en, "commands")
+        $cmds := []string{}
+        if cn >= 0 && doc.is_list(cn) {
+            for j in 0:doc.count(cn) {
+                 item := jstr(&doc, doc.at(cn, j))
+                 if item.len > 0 {
+                     cmds.push(item)
+                 }
+            }
+        }
+        out.push(MacroDef{
+            name: name,
+            title: title,
+            desc: desc,
+            params: params,
+            builtin: false,
+            commands: cmds
+        })
+    }
+    << out
+}
+
+pub fn new_store(dir string) TraceStore {
+    dir_box := chan string{cap: 1}
+    dir_box <- dir + ""
+    box := chan []Step{cap: 1}
+    box <- []Step{}
+    macros_box := chan []MacroDef{cap: 1}
+    mkdir_quiet(dir + "")
+    macros_box <- load_custom_macros(&dir)
+    << TraceStore{dir_box: dir_box, box: box, macros_box: macros_box}
+}
+
+pub fn (t &TraceStore) clone() TraceStore {
+    << TraceStore{dir_box: t.dir_box, box: t.box, macros_box: t.macros_box}
+}
+
+pub fn (t &TraceStore) dir() string {
+    d := <-t.dir_box
+    out := d + ""
+    t.dir_box <- d
+    << out
+}
+
+pub fn (t &TraceStore) clear() {
+    _ := <-t.box
+    t.box <- []Step{}
+}
+
+pub fn (s &Step) clone() Step {
+    $b := []string{}
+    for i in 0:s.before.len { b.push(s.before[i] + "") }
+    $a := []string{}
+    for i in 0:s.after.len { a.push(s.after[i] + "") }
+    << Step{
+        action: s.action + "",
+        target_text: s.target_text + "",
+        value: s.value + "",
+        x: s.x,
+        y: s.y,
+        x2: s.x2,
+        y2: s.y2,
+        before: b,
+        after: a
+    }
+}
+
+pub fn (t &TraceStore) record(s Step) {
+    list := <-t.box
+    $next := []Step{}
+    for it in list {
+        next.push(it.clone())
+    }
+    if next.len < 200 {
+        next.push(s.clone())
+    }
+    t.box <- next
+}
+
+pub fn (t &TraceStore) steps() []Step {
+    list := <-t.box
+    $out := []Step{}
+    for it in list {
+        out.push(it.clone())
+    }
+    t.box <- list
+    << out
+}
+
+fn quote_list(items &[]string) string {
+    $out := "["
+    for i in 0:items.len {
+        if i > 0 {
+            out.push_str(",")
+        }
+        s := items[i]
+        out.push_str(json.quote(&s))
+    }
+    out.push_str("]")
+    << out
+}
+
+fn persist_custom_macros(dir &string, custom &[]MacroDef) {
+    $out := "["
+    for i in 0:custom.len {
+        if i > 0 { out.push_str(",") }
+        m := custom[i].clone()
+        out.push_str("{\"name\":" + json.quote(&m.name) + ",\"title\":" + json.quote(&m.title) + ",\"desc\":" + json.quote(&m.desc) + ",\"params\":" + json.quote(&m.params) + ",\"builtin\":false,\"commands\":" + quote_list(&m.commands) + "}")
+    }
+    out.push_str("]")
+    mkdir_quiet(*dir + "")
+    path := *dir + "/macros.json"
+    os.write(path, out) or (err) { << }
+}
+
+pub fn (t &TraceStore) list_macros() []MacroDef {
+    $all := builtin_macros()
+    custom := <-t.macros_box
+    $kept := []MacroDef{}
+    for m in custom {
+        kept.push(m.clone())
+        all.push(m.clone())
+    }
+    t.macros_box <- kept
+    << all
+}
+
+pub fn (t &TraceStore) find_macro(name &string) MacroDef {
+    all := t.list_macros()
+    for m in all {
+        if m.name == *name || ("macro:" + m.name) == *name {
+            << m.clone()
+        }
+    }
+    << MacroDef{name: "", title: "", desc: "", params: "", builtin: false, commands: []string{}}
+}
+
+pub fn (t &TraceStore) upsert_macro(m MacroDef) {
+    custom := <-t.macros_box
+    $next := []MacroDef{}
+    $replaced := false
+    for it in custom {
+        if it.name == m.name {
+            next.push(m.clone())
+            replaced = true
+        } else {
+            next.push(it.clone())
+        }
+    }
+    if !replaced {
+        next.push(m.clone())
+    }
+    d := t.dir()
+    persist_custom_macros(&d, &next)
+    t.macros_box <- next
+}
+
+pub fn (t &TraceStore) delete_macro(name &string) bool {
+    custom := <-t.macros_box
+    $next := []MacroDef{}
+    $removed := false
+    for it in custom {
+        if it.name == *name {
+            removed = true
+        } else {
+            next.push(it.clone())
+        }
+    }
+    d := t.dir()
+    persist_custom_macros(&d, &next)
+    t.macros_box <- next
+    << removed
+}
+
+pub fn step_to_cmd(s &Step) string {
+    if s.action == "tap" {
+        << "tap " + strconv.itoa(s.x) + " " + strconv.itoa(s.y)
+    }
+    if s.action == "swipe" {
+        << "swipe " + strconv.itoa(s.x) + " " + strconv.itoa(s.y) + " " + strconv.itoa(s.x2) + " " + strconv.itoa(s.y2) + " 260"
+    }
+    if s.action == "input" {
+        << "submit " + s.value
+    }
+    if s.action == "home" || s.action == "back" || s.action == "spotlight" || s.action == "focus_url" {
+        << s.action + ""
+    }
+    if s.value.len > 0 {
+        << s.action + " " + s.value
+    }
+    << s.action + ""
+}
+
+pub fn (t &TraceStore) save_flow(name &string) int {
+    << t.save_flow_titled(name, "", "")
+}
+
+pub fn (t &TraceStore) save_flow_titled(name &string, title string, desc string) int {
+    list := t.steps()
+    $cmds := []string{}
+    $out := "{\"name\":" + json.quote(name) + ",\"steps\":["
+    for i in 0:list.len {
+        if i > 0 {
+            out.push_str(",")
+        }
+        s := list[i].clone()
+        cmd := step_to_cmd(&s)
+        if cmd.len > 0 {
+            cmds.push(cmd)
+        }
+        out.push_str("{\"action\":" + json.quote(&s.action) + ",\"text\":" + json.quote(&s.target_text) + ",\"value\":" + json.quote(&s.value) + ",\"x\":" + strconv.itoa(s.x) + ",\"y\":" + strconv.itoa(s.y) + ",\"x2\":" + strconv.itoa(s.x2) + ",\"y2\":" + strconv.itoa(s.y2) + ",\"before\":" + quote_list(&s.before) + ",\"after\":" + quote_list(&s.after) + "}")
+    }
+    out.push_str("]}")
+    d := t.dir()
+    mkdir_quiet(d + "")
+    path := d + "/" + *name + ".json"
+    os.write(path, out) or (err) {
+        << -1
+    }
+    $mt := "录制宏: " + *name
+    if title.len > 0 { mt = title + "" }
+    $md := "由操作轨迹自动保存的可回放宏 (" + strconv.itoa(cmds.len) + " 步)"
+    if desc.len > 0 { md = desc + "" }
+    if cmds.len > 0 {
+        $copy := []string{}
+        for c in cmds {
+            copy.push(c + "")
+        }
+        t.upsert_macro(MacroDef{
+            name: *name + "",
+            title: mt + "",
+            desc: md + "",
+            params: "",
+            builtin: false,
+            commands: copy
+        })
+    }
+    << list.len
+}
+
+pub fn macros_array_json(list &[]MacroDef) string {
+    $out := "["
+    for i in 0:list.len {
+        if i > 0 { out.push_str(",") }
+        m := list[i].clone()
+        $bi := "false"
+        if m.builtin { bi = "true" }
+        out.push_str("{\"name\":" + json.quote(&m.name) + ",\"title\":" + json.quote(&m.title) + ",\"desc\":" + json.quote(&m.desc) + ",\"params\":" + json.quote(&m.params) + ",\"builtin\":" + bi + ",\"commands\":" + quote_list(&m.commands) + "}")
+    }
+    out.push_str("]")
+    << out
+}
+
+pub fn (t &TraceStore) load_flow(name &string) Flow {
+    $empty := Flow{name: *name + "", params: []string{}, steps: []Step{}}
+    path := t.dir() + "/" + *name + ".json"
+    raw := os.read(path) or (err) {
+        << empty
+    }
+    doc := json.parse(&raw)
+    if !doc.ok() || !doc.is_dict(doc.root()) {
+        << empty
+    }
+    sn := doc.get(doc.root(), "steps")
+    if sn < 0 || !doc.is_list(sn) {
+        << empty
+    }
+    $steps := []Step{}
+    for i in 0:doc.count(sn) {
+        en := doc.at(sn, i)
+        if !doc.is_dict(en) {
+            ->
+        }
+        act := jstr(&doc, doc.get(en, "action"))
+        txt := jstr(&doc, doc.get(en, "text"))
+        val := jstr(&doc, doc.get(en, "value"))
+        xn := doc.get(en, "x")
+        yn := doc.get(en, "y")
+        x2n := doc.get(en, "x2")
+        y2n := doc.get(en, "y2")
+        $x := 0
+        if xn >= 0 && doc.is_number(xn) { x = doc.number_int(xn) }
+        $y := 0
+        if yn >= 0 && doc.is_number(yn) { y = doc.number_int(yn) }
+        $x2 := 0
+        if x2n >= 0 && doc.is_number(x2n) { x2 = doc.number_int(x2n) }
+        $y2 := 0
+        if y2n >= 0 && doc.is_number(y2n) { y2 = doc.number_int(y2n) }
+        steps.push(Step{action: act, target_text: txt, value: val, x: x, y: y, x2: x2, y2: y2, before: []string{}, after: []string{}})
+    }
+    << Flow{name: *name + "", params: []string{}, steps: steps}
+}

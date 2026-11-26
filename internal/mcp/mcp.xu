@@ -1,0 +1,343 @@
+@internal/mcp
+
+#os
+#net
+#net/websocket
+#time
+#internal/ws
+#strconv
+#strings
+#encoding/json
+
+fn close_conn(c $&net.Conn) {
+    c.close() or (err) { << }
+}
+
+pub fn ws_request(port int, payload &string) string {
+    $conn := net.dial_timeout("tcp", "127.0.0.1:" + strconv.itoa(port), 5000000000) or (err) {
+        << "{\"ok\":false,\"error\":\"cannot connect to xuesp ws on 127.0.0.1:" + strconv.itoa(port) + "\"}"
+    }
+    hs := "GET / HTTP/1.1\r\nHost: 127.0.0.1:" + strconv.itoa(port) + "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+    conn.write(&hs) or (err) {
+        close_conn($&conn)
+        << "{\"ok\":false,\"error\":\"ws handshake write failed\"}"
+    }
+    $buf := ""
+    while ws.header_end(&buf) < 0 {
+        chunk := conn.read(4096) or (err) {
+            close_conn($&conn)
+            << "{\"ok\":false,\"error\":\"ws handshake read failed\"}"
+        }
+        if chunk.len == 0 {
+            close_conn($&conn)
+            << "{\"ok\":false,\"error\":\"ws handshake closed\"}"
+        }
+        buf.push_str(chunk)
+    }
+    end := ws.header_end(&buf)
+    buf = buf[end:buf.len]
+    frame := websocket.encode_frame(true, websocket.OP_TEXT, payload, true)
+    conn.write(&frame) or (err) {
+        close_conn($&conn)
+        << "{\"ok\":false,\"error\":\"ws frame write failed\"}"
+    }
+    for {
+        m := ws.next_msg(&buf) or (err) {
+            close_conn($&conn)
+            << "{\"ok\":false,\"error\":\"ws decode error\"}"
+        }
+        if m.used == 0 {
+            chunk := conn.read(65536) or (err) {
+                close_conn($&conn)
+                << "{\"ok\":false,\"error\":\"ws read failed\"}"
+            }
+            if chunk.len == 0 {
+                close_conn($&conn)
+                << "{\"ok\":false,\"error\":\"ws EOF\"}"
+            }
+            buf.push_str(chunk)
+            ->
+        }
+        buf = buf[m.used:buf.len]
+        if m.opcode == websocket.OP_TEXT {
+            close_conn($&conn)
+            << m.payload + ""
+        }
+    }
+    close_conn($&conn)
+    << "{\"ok\":false,\"error\":\"ws unexpected end\"}"
+}
+
+fn extract_raw_id(raw &string) string {
+    val := json.parse(raw)
+    if !val.ok() || !val.is_dict(val.root()) {
+        << "null"
+    }
+    id_n := val.get(val.root(), "id")
+    if id_n < 0 {
+        << "null"
+    }
+    if val.is_string(id_n) {
+        txt := val.as_string(id_n) or (err) { << "null" }
+        << json.quote(&txt)
+    }
+    if val.is_number(id_n) {
+        << strconv.itoa(val.number_int(id_n))
+    }
+    << "null"
+}
+
+fn str_at(d &json.Doc, node int, key string) string {
+    if node < 0 {
+        << ""
+    }
+    c := d.get(node, key)
+    if c < 0 || !d.is_string(c) {
+        << ""
+    }
+    << d.as_string(c) or (err) { << "" }
+}
+
+fn int_at(d &json.Doc, node int, key string, def int) int {
+    if node < 0 {
+        << def
+    }
+    c := d.get(node, key)
+    if c < 0 || !d.is_number(c) {
+        << def
+    }
+    << d.number_int(c) or (err) { << def }
+}
+
+fn bool_at(d &json.Doc, node int, key string, def bool) bool {
+    if node < 0 {
+        << def
+    }
+    c := d.get(node, key)
+    if c < 0 || !d.is_bool(c) {
+        << def
+    }
+    << d.as_bool(c) or (err) { << false }
+}
+
+pub fn tools_list_json() string {
+    << "{\"tools\":[" +
+        "{\"name\":\"xuesp_list_cluster\",\"description\":\"List all ESP32 BLE HID nodes (each with 4 BLE slots), connected BLE peers, configured device bindings, and registered macros.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}," +
+        "{\"name\":\"xuesp_bind_device\",\"description\":\"Bind a target device ID to an ESP32 node (mqtt_topic) and BLE slot (0..3), control BLE advertising / slot disconnection, or reset node Wi-Fi.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"device\":{\"type\":\"string\",\"description\":\"Device ID or peer key\"},\"mqtt_topic\":{\"type\":\"string\",\"description\":\"ESP32 MQTT root topic (e.g. xu/esp32/cyd)\"},\"ble_slot\":{\"type\":\"integer\",\"description\":\"BLE HID slot index 0..3\"},\"advertise\":{\"type\":\"integer\",\"description\":\"Optional: 1 to start BLE advertising on mqtt_topic, 0 to stop\"},\"disconnect_slot\":{\"type\":\"integer\",\"description\":\"Optional: disconnect BLE slot 0..3 on mqtt_topic\"},\"reset_wifi\":{\"type\":\"boolean\",\"description\":\"Optional: true to reset Wi-Fi on mqtt_topic back to BLE provisioning mode\"}}}}," +
+        "{\"name\":\"xuesp_exec_command\",\"description\":\"Execute any HID command, && command pipeline, or macro:<name> <arg> on a target device/peer (or 'all' for cluster broadcast). Examples: 'tap 16384 16384', 'spotlight && submit Safari', 'macro:open_url www.baidu.com', 'home', 'scroll_down'.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"device\":{\"type\":\"string\",\"description\":\"Target device ID, peer ID, or 'all' for broadcast\"},\"command\":{\"type\":\"string\",\"description\":\"Executable command, && pipeline, or macro:<name> <arg>\"}},\"required\":[\"command\"]}}," +
+        "{\"name\":\"xuesp_list_macros\",\"description\":\"List all built-in and custom operation macros supported by XuESP.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}," +
+        "{\"name\":\"xuesp_run_macro\",\"description\":\"Run a named operation macro (e.g. open_url, open_app, spotlight_search, clear_and_submit, unlock_screen, app_switcher, kill_current_app, refresh_page) on a target device.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"device\":{\"type\":\"string\",\"description\":\"Target device ID or peer ID\"},\"name\":{\"type\":\"string\",\"description\":\"Macro name (without macro: prefix)\"},\"arg\":{\"type\":\"string\",\"description\":\"Optional parameter for the macro\"}},\"required\":[\"name\"]}}," +
+        "{\"name\":\"xuesp_provision_esp32\",\"description\":\"Provision a fresh ESP32 node over BLE: scan for XuPlay-Setup-* peripherals, or write the Wi-Fi and MQTT settings to one of them.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"scan (default), write or status\"},\"device\":{\"type\":\"string\",\"description\":\"Peripheral name, e.g. XuPlay-Setup-EEFF (write only)\"},\"ssid\":{\"type\":\"string\",\"description\":\"Wi-Fi name (write only)\"},\"pass\":{\"type\":\"string\",\"description\":\"Wi-Fi password (write only)\"},\"mqtt_uri\":{\"type\":\"string\",\"description\":\"MQTT broker, e.g. mqtt://192.168.1.10:1883 (write only)\"},\"root\":{\"type\":\"string\",\"description\":\"MQTT topic root, e.g. xu/esp32/cyd-a1b2 (write only)\"},\"name\":{\"type\":\"string\",\"description\":\"BLE HID name (write only)\"}}}}," +
+        "{\"name\":\"xuesp_save_macro\",\"description\":\"Save a reusable custom macro either from an explicit list of command steps or from the recorded manual action trace.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Unique macro identifier\"},\"title\":{\"type\":\"string\",\"description\":\"Human-readable title\"},\"desc\":{\"type\":\"string\",\"description\":\"Macro description\"},\"steps\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Ordered list of XuESP commands\"},\"from_trace\":{\"type\":\"boolean\",\"description\":\"If true, convert the recorded trace into this macro\"},\"device\":{\"type\":\"string\",\"description\":\"Device key when from_trace is true\"}},\"required\":[\"name\"]}}" +
+    "]}"
+}
+
+fn call_tool(ws_port int, tool_name &string, args int, doc &json.Doc) string {
+    if *tool_name == "xuesp_list_cluster" {
+        req := "{\"op\":\"cluster_state\"}"
+        << ws_request(ws_port, &req)
+    }
+    if *tool_name == "xuesp_bind_device" {
+        dev := str_at(doc, args, "device")
+        topic := str_at(doc, args, "mqtt_topic")
+        slot := int_at(doc, args, "ble_slot", -1)
+        adv := int_at(doc, args, "advertise", -1)
+        disc := int_at(doc, args, "disconnect_slot", -1)
+        reset_wifi := bool_at(doc, args, "reset_wifi", false)
+        if reset_wifi && topic.len > 0 {
+            req := "{\"op\":\"esp_reset_wifi\",\"mqtt_topic\":" + json.quote(&topic) + "}"
+            << ws_request(ws_port, &req)
+        }
+        if adv >= 0 && topic.len > 0 {
+            req := "{\"op\":\"ble_adv\",\"mqtt_topic\":" + json.quote(&topic) + ",\"submit\":" + bool_text(adv != 0) + "}"
+            << ws_request(ws_port, &req)
+        }
+        if disc >= 0 && topic.len > 0 {
+            req := "{\"op\":\"ble_disconnect\",\"mqtt_topic\":" + json.quote(&topic) + ",\"ble_slot\":" + strconv.itoa(disc) + "}"
+            << ws_request(ws_port, &req)
+        }
+        req := "{\"op\":\"bind_slot\",\"device\":" + json.quote(&dev) + ",\"mqtt_topic\":" + json.quote(&topic) + ",\"ble_slot\":" + strconv.itoa(slot) + "}"
+        << ws_request(ws_port, &req)
+    }
+    if *tool_name == "xuesp_exec_command" {
+        dev := str_at(doc, args, "device")
+        cmd := str_at(doc, args, "command")
+        if dev == "all" || dev == "*" {
+            req := "{\"op\":\"batch\",\"mode\":\"broadcast\",\"text\":" + json.quote(&cmd) + "}"
+            << ws_request(ws_port, &req)
+        }
+        req := "{\"op\":\"exec\",\"device\":" + json.quote(&dev) + ",\"text\":" + json.quote(&cmd) + "}"
+        << ws_request(ws_port, &req)
+    }
+    if *tool_name == "xuesp_provision_esp32" {
+        action := str_at(doc, args, "action")
+        if action == "status" {
+            req := "{\"op\":\"provision_status\"}"
+            << ws_request(ws_port, &req)
+        }
+        if action == "write" {
+            dev := str_at(doc, args, "device")
+            ssid := str_at(doc, args, "ssid")
+            psw := str_at(doc, args, "pass")
+            uri := str_at(doc, args, "mqtt_uri")
+            root := str_at(doc, args, "root")
+            nm := str_at(doc, args, "name")
+            if dev.len == 0 || ssid.len == 0 {
+                << "{\"ok\":false,\"error\":\"device and ssid are required\"}"
+            }
+            req := "{\"op\":\"provision_write\",\"device\":" + json.quote(&dev) +
+                ",\"ssid\":" + json.quote(&ssid) + ",\"pass\":" + json.quote(&psw) +
+                ",\"mqtt_uri\":" + json.quote(&uri) + ",\"root\":" + json.quote(&root) +
+                ",\"name\":" + json.quote(&nm) + "}"
+            first := ws_request(ws_port, &req)
+            << wait_for_provision(ws_port, &first)
+        }
+        req := "{\"op\":\"provision_scan\"}"
+        first := ws_request(ws_port, &req)
+        << wait_for_provision(ws_port, &first)
+    }
+    if *tool_name == "xuesp_list_macros" {
+        req := "{\"op\":\"macro_list\"}"
+        << ws_request(ws_port, &req)
+    }
+    if *tool_name == "xuesp_run_macro" {
+        dev := str_at(doc, args, "device")
+        nm := str_at(doc, args, "name")
+        arg := str_at(doc, args, "arg")
+        req := "{\"op\":\"macro_run\",\"device\":" + json.quote(&dev) + ",\"name\":" + json.quote(&nm) + ",\"text\":" + json.quote(&arg) + "}"
+        << ws_request(ws_port, &req)
+    }
+    if *tool_name == "xuesp_save_macro" {
+        nm := str_at(doc, args, "name")
+        title := str_at(doc, args, "title")
+        desc := str_at(doc, args, "desc")
+        from_trace := bool_at(doc, args, "from_trace", false)
+        dev := str_at(doc, args, "device")
+        if from_trace {
+            req := "{\"op\":\"trace_to_macro\",\"device\":" + json.quote(&dev) + ",\"name\":" + json.quote(&nm) + ",\"title\":" + json.quote(&title) + ",\"desc\":" + json.quote(&desc) + "}"
+            << ws_request(ws_port, &req)
+        }
+        $steps_joined := ""
+        $steps_node := -1
+        if args >= 0 {
+            steps_node = doc.get(args, "steps")
+        }
+        if steps_node >= 0 && doc.is_list(steps_node) {
+            n := doc.count(steps_node)
+            for i in 0:n {
+                it := doc.at(steps_node, i)
+                if !doc.is_string(it) {
+                    ->
+                }
+                txt := doc.as_string(it) or (err) {
+                    ->
+                }
+                if steps_joined.len > 0 {
+                    steps_joined.push_str(" && ")
+                }
+                steps_joined.push_str(txt)
+            }
+        }
+        req := "{\"op\":\"macro_save\",\"name\":" + json.quote(&nm) + ",\"goal\":" + json.quote(&title) + ",\"mode\":" + json.quote(&desc) + ",\"text\":" + json.quote(&steps_joined) + "}"
+        << ws_request(ws_port, &req)
+    }
+    << "{\"ok\":false,\"error\":\"unknown tool: " + *tool_name + "\"}"
+}
+
+fn wait_for_provision(ws_port int, first &string) string {
+    $last := *first + ""
+    for i in 0:12 {
+        time.sleep(700000000)
+        req := "{\"op\":\"provision_status\"}"
+        res := ws_request(ws_port, &req)
+        if res.len > 0 {
+            last = res + ""
+            if strings.contains(&res, "\"result\":null") {
+                ->
+            }
+            if strings.contains(&res, "\"op\":\"provision_result\"") {
+                << res
+            }
+        }
+    }
+    << last
+}
+
+fn bool_text(v bool) string {
+    if v {
+        << "true"
+    }
+    << "false"
+}
+
+pub fn handle_jsonrpc(raw &string, ws_port int) string {
+    trimmed := strings.trim_space(raw)
+    if trimmed.len == 0 {
+        << ""
+    }
+    id_raw := extract_raw_id(&trimmed)
+    doc := json.parse(&trimmed)
+    if !doc.ok() || !doc.is_dict(doc.root()) {
+        << "{\"jsonrpc\":\"2.0\",\"id\":" + id_raw + ",\"error\":{\"code\":-32700,\"message\":\"Parse error\"}}"
+    }
+    root := doc.root()
+    method := str_at(&doc, root, "method")
+    if method == "notifications/initialized" || method == "initialized" || method == "notifications/cancelled" {
+        << ""
+    }
+    if method == "initialize" {
+        << "{\"jsonrpc\":\"2.0\",\"id\":" + id_raw + ",\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{\"listChanged\":false}},\"serverInfo\":{\"name\":\"xuesp-mcp\",\"version\":\"0.1.0\"}}}"
+    }
+    if method == "ping" {
+        << "{\"jsonrpc\":\"2.0\",\"id\":" + id_raw + ",\"result\":{}}"
+    }
+    if method == "tools/list" {
+        << "{\"jsonrpc\":\"2.0\",\"id\":" + id_raw + ",\"result\":" + tools_list_json() + "}"
+    }
+    if method == "tools/call" {
+        params := doc.get(root, "params")
+        if params < 0 {
+            << "{\"jsonrpc\":\"2.0\",\"id\":" + id_raw + ",\"error\":{\"code\":-32602,\"message\":\"Missing params\"}}"
+        }
+        tname := str_at(&doc, params, "name")
+        args := doc.get(params, "arguments")
+        res_str := call_tool(ws_port, &tname, args, &doc)
+        << "{\"jsonrpc\":\"2.0\",\"id\":" + id_raw + ",\"result\":{\"content\":[{\"type\":\"text\",\"text\":" + json.quote(&res_str) + "}]}}"
+    }
+    << "{\"jsonrpc\":\"2.0\",\"id\":" + id_raw + ",\"error\":{\"code\":-32601,\"message\":\"Method not found: " + method + "\"}}"
+}
+
+pub fn serve_stdio(ws_port int) int {
+    $stdin := os.open("/dev/stdin") or (err) {
+        eprintln("xuesp mcp: open /dev/stdin: " + err.msg())
+        << 1
+    }
+    $buf := ""
+    for {
+        nl := strings.index_of(&buf, "\n")
+        if nl >= 0 {
+            line := buf[0:nl] + ""
+            buf = buf[nl + 1:buf.len] + ""
+            resp := handle_jsonrpc(&line, ws_port)
+            if resp.len > 0 {
+                println(resp)
+            }
+            ->
+        }
+        chunk := stdin.read(4096) or (err) {
+            <-
+        }
+        if chunk.len == 0 {
+            <-
+        }
+        buf.push_str(chunk)
+    }
+    if strings.trim_space(&buf).len > 0 {
+        resp := handle_jsonrpc(&buf, ws_port)
+        if resp.len > 0 {
+            println(resp)
+        }
+    }
+    stdin.close() or (err) { << 0 }
+    << 0
+}

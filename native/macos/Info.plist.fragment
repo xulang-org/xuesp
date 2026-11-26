@@ -1,0 +1,2 @@
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>XuESP uses Bluetooth to scan and provision XuPlay-Setup ESP32 nodes.</string>

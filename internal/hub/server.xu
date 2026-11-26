@@ -1,0 +1,95 @@
+@internal/hub
+
+#net
+#os
+#strconv
+#time
+#net/websocket
+#internal/ws
+
+// serve listens on loopback only; CLI, MCP, and the macOS console drive ESP32 nodes through it.
+pub fn serve(port int, h Hub) int {
+    ln := net.listen_on("tcp", "127.0.0.1:" + strconv.itoa(port)) or >>
+    xu accept_loop(ln, h)
+    << 0
+}
+
+fn accept_loop(l net.Listener, h Hub) {
+    $ln := l
+    $n := 0
+    for {
+        conn := ln.accept() or (err) {
+            ->
+        }
+        n += 1
+        xu client(conn, n, h.clone())
+    }
+}
+
+fn no_sigpipe(conn &net.Conn) {
+    fd := conn.descriptor() or (e) { << }
+    _ := os.setsockopt_int(fd, 65535, 4130, 1) or (e) { << }
+}
+
+fn client(c net.Conn, no int, h Hub) {
+    $conn := c
+    no_sigpipe(&conn)
+    $buf := ""
+    $seq := 0
+    $upgraded := false
+    $open := true
+    while open {
+        chunk := conn.read(65536) or (err) {
+            open = false
+            ->
+        }
+        if chunk.len == 0 {
+            open = false
+            ->
+        }
+        buf.push_str(chunk)
+        if !upgraded {
+            end := ws.header_end(&buf)
+            if end < 0 {
+                ->
+            }
+            head := buf[0:end]
+            resp := ws.handshake(&head) or (err) {
+                open = false
+                ->
+            }
+            conn.write(&resp) or (err) {
+                open = false
+                ->
+            }
+            buf = buf[end:buf.len]
+            upgraded = true
+        }
+        $more := true
+        while more && open {
+            m := ws.next_msg(&buf) or (err) {
+                open = false
+                <-
+            }
+            if m.used == 0 {
+                more = false
+                ->
+            }
+            buf = buf[m.used:buf.len]
+            if m.opcode == websocket.OP_CLOSE {
+                open = false
+                <-
+            }
+            if m.opcode == websocket.OP_TEXT {
+                seq += 1
+                out := answer(&h, no * 1000000 + seq, &m.payload, time.now_time().unix_milli())
+                wire := ws.text_frame(&out)
+                conn.write(&wire) or (err) {
+                    open = false
+                    <-
+                }
+            }
+        }
+    }
+    conn.close() or (err) { << }
+}

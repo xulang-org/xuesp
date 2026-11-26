@@ -1,0 +1,243 @@
+@internal/device
+
+#errors
+#os
+#strconv
+#strings
+#encoding/toml
+
+pub const SLOTS_PER_NODE = 4
+
+pub struct Device {
+    pub id string
+    pub phone_name string
+    pub mqtt_topic string
+    pub ble_peer string
+    pub ble_slot int
+    pub home string
+    pub group string
+}
+
+pub struct Config {
+    pub mqtt_host string
+    pub mqtt_port int
+    pub default_topic string
+    pub transfer_port int
+    pub auto_link bool
+    pub devices []Device
+}
+
+pub fn default_config() Config {
+    << Config{
+        mqtt_host: "127.0.0.1",
+        mqtt_port: 1883,
+        default_topic: "xu/esp32/cyd",
+        transfer_port: 8766,
+        auto_link: true,
+        devices: []Device{}
+    }
+}
+
+pub fn (d &Device) clone() Device {
+    << Device{
+        id: d.id + "",
+        phone_name: d.phone_name + "",
+        mqtt_topic: d.mqtt_topic + "",
+        ble_peer: d.ble_peer + "",
+        ble_slot: d.ble_slot,
+        home: d.home + "",
+        group: d.group + ""
+    }
+}
+
+pub fn (c &Config) clone() Config {
+    $list := []Device{}
+    for i in 0:c.devices.len {
+        list.push(c.devices[i].clone())
+    }
+    << Config{
+        mqtt_host: c.mqtt_host + "",
+        mqtt_port: c.mqtt_port,
+        default_topic: c.default_topic + "",
+        transfer_port: c.transfer_port,
+        auto_link: c.auto_link,
+        devices: list
+    }
+}
+
+pub fn (c &Config) find_by_id(id &string) int {
+    for i in 0:c.devices.len {
+        if c.devices[i].id == *id {
+            << i
+        }
+    }
+    << -1
+}
+
+fn check_unique(devices &[]Device, d &Device) bool {
+    for o in devices {
+        if o.id == d.id {
+            >> errors.new("devices: duplicate id " + d.id)
+        }
+        // Multiple phones may share one ESP32 mqtt_topic when distinguished by ble_peer or ble_slot.
+        if d.mqtt_topic.len > 0 && o.mqtt_topic == d.mqtt_topic {
+            if d.ble_peer.len > 0 && o.ble_peer == d.ble_peer {
+                >> errors.new("devices: duplicate ble_peer " + d.ble_peer)
+            }
+            if d.ble_slot >= 0 && o.ble_slot == d.ble_slot {
+                >> errors.new("devices: duplicate ble_slot " + strconv.itoa(d.ble_slot))
+            }
+        }
+    }
+    << true
+}
+
+pub fn parse(src &string) Config {
+    doc := toml.parse(src)
+    $c := default_config()
+
+    recv_sec := "receiver"
+    xfer_key := "transfer_port"
+    xfer_raw := doc.get_in(&recv_sec, &xfer_key)
+    if xfer_raw.len > 0 {
+        xp := strconv.atoi(&xfer_raw) or (err) {
+            >> errors.new("devices: transfer_port out of range")
+        }
+        if xp < 0 || xp > 65535 {
+            >> errors.new("devices: transfer_port out of range")
+        }
+        c.transfer_port = xp
+    }
+
+    mqtt_sec := "mqtt"
+    host_key := "host"
+    port_key := "port"
+    topic_key := "default_topic"
+    mhost := doc.get_in(&mqtt_sec, &host_key)
+    if mhost.len > 0 {
+        c.mqtt_host = mhost
+    }
+    mport := doc.get_in(&mqtt_sec, &port_key)
+    if mport.len > 0 {
+        mp := strconv.atoi(&mport) or (err) {
+            >> errors.new("devices: invalid mqtt port")
+        }
+        if mp <= 0 || mp > 65535 {
+            >> errors.new("devices: invalid mqtt port")
+        }
+        c.mqtt_port = mp
+    }
+    dtopic := doc.get_in(&mqtt_sec, &topic_key)
+    if dtopic.len > 0 {
+        c.default_topic = dtopic
+    }
+
+    esp_sec := "esp"
+    http_key := "http_port"
+    http_raw := doc.get_in(&esp_sec, &http_key)
+    if http_raw.len > 0 {
+        hp := strconv.atoi(&http_raw) or (err) {
+            >> errors.new("devices: http_port out of range")
+        }
+        if hp < 0 || hp > 65535 {
+            >> errors.new("devices: http_port out of range")
+        }
+        c.transfer_port = hp
+    }
+
+    auto_key := "auto_link"
+    $auto_raw := doc.get_in(&esp_sec, &auto_key)
+    if auto_raw.len == 0 {
+        studio_sec := "studio"
+        auto_raw = doc.get_in(&studio_sec, &auto_key)
+    }
+    if auto_raw == "true" {
+        c.auto_link = true
+    } else if auto_raw == "false" {
+        c.auto_link = false
+    } else if auto_raw.len > 0 {
+        >> errors.new("devices: auto_link must be true or false")
+    }
+
+    table := "device"
+    id_key := "id"
+    phone_name_key := "phone_name"
+    ble_peer_key := "ble_peer"
+    ble_slot_key := "ble_slot"
+    home_key := "home"
+    group_key := "group"
+    mtopic_key := "mqtt_topic"
+    for i in 0:doc.array_len(&table) {
+        slot_raw := doc.get_at(&table, i, &ble_slot_key)
+        $slot := -1
+        if slot_raw.len > 0 {
+            s := strconv.atoi(&slot_raw) or (err) {
+                >> errors.new("devices: invalid ble_slot")
+            }
+            slot = s
+        }
+        d := Device{
+            id: doc.get_at(&table, i, &id_key),
+            phone_name: doc.get_at(&table, i, &phone_name_key),
+            mqtt_topic: doc.get_at(&table, i, &mtopic_key),
+            ble_peer: doc.get_at(&table, i, &ble_peer_key),
+            ble_slot: slot,
+            home: doc.get_at(&table, i, &home_key),
+            group: doc.get_at(&table, i, &group_key)
+        }
+        if d.id.len == 0 {
+            >> errors.new("devices: device without id")
+        }
+        _ := check_unique(&c.devices, &d) or >>
+        c.devices.push(d)
+    }
+    << c
+}
+
+pub fn load(path string) Config {
+    src := os.read(path) or (err) {
+        << default_config()
+    }
+    << parse(&src) or >>
+}
+
+pub fn format_toml(c &Config) string {
+    $out := "[mqtt]\nhost = \"" + c.mqtt_host + "\"\nport = " + strconv.itoa(c.mqtt_port) + "\ndefault_topic = \"" + c.default_topic + "\"\n\n"
+    out.push_str("[esp]\nhttp_port = " + strconv.itoa(c.transfer_port) + "\n")
+    if c.auto_link {
+        out.push_str("auto_link = true\n\n")
+    } else {
+        out.push_str("auto_link = false\n\n")
+    }
+    for d in c.devices {
+        out.push_str("[[device]]\nid = \"" + d.id + "\"\n")
+        if d.phone_name.len > 0 {
+            out.push_str("phone_name = \"" + d.phone_name + "\"\n")
+        }
+        if d.mqtt_topic.len > 0 {
+            out.push_str("mqtt_topic = \"" + d.mqtt_topic + "\"\n")
+        }
+        if d.ble_peer.len > 0 {
+            out.push_str("ble_peer = \"" + d.ble_peer + "\"\n")
+        }
+        if d.ble_slot >= 0 {
+            out.push_str("ble_slot = " + strconv.itoa(d.ble_slot) + "\n")
+        }
+        if d.home.len > 0 {
+            out.push_str("home = \"" + d.home + "\"\n")
+        }
+        if d.group.len > 0 {
+            out.push_str("group = \"" + d.group + "\"\n")
+        }
+        out.push_str("\n")
+    }
+    << out
+}
+
+pub fn save(path string, c &Config) bool {
+    body := format_toml(c)
+    os.write(path, body) or (err) {
+        << false
+    }
+    << true
+}

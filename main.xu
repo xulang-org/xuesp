@@ -1,0 +1,204 @@
+@main
+
+#os
+#net
+#net/websocket
+#strconv
+#errors
+#internal/config
+#internal/device
+#internal/hub
+#internal/mcp
+#internal/ws
+#internal/web
+#ui
+
+const VERSION = "0.1.0"
+
+fn drain_events(ech chan ui.Event) {
+    for {
+        ev := <-ech
+        if ev.kind == ui.EV_EXIT {
+            <<< 0
+        }
+    }
+}
+
+fn set_slot(w &ui.Window, name string, val string) {
+    w.write_slot(name, val) or (err) {
+        <<
+    }
+}
+
+fn run_window(ws_port int) int {
+    $app := ui.new_app()
+    title := "XuESP"
+    app.win_title = title + ""
+    app.win_w = 920
+    app.win_h = 680
+    ui.register_content_plugin(ui.ContentPlugin{kind: ui.CONTENT_NATIVE, bootstrap: "XuEspBootstrap", macos_src: "native/macos/xuesp_ui.swift", macos_frameworks: "CoreBluetooth", linux_src: "", linux_libs: "", windows_src: "", windows_libs: ""})
+    main := app.open_content_window(ui.WindowOpts{title: title, width: 920, height: 680}, ui.CONTENT_NATIVE) or >>
+    set_slot(&main, "xu_ui_xuesp_ws.txt", strconv.itoa(ws_port))
+    println("console: window " + strconv.itoa(main.id) + "/" + strconv.itoa(main.generation) + " (920x680)")
+    xu drain_events(app.event_ch)
+    << app.run() or >>
+}
+
+fn close_cli_conn(c $&net.Conn) {
+    c.close() or (err) { << }
+}
+
+fn ws_cli_call(port int, payload &string) int {
+    $conn := net.dial_timeout("tcp", "127.0.0.1:" + strconv.itoa(port), 5000000000) or (err) {
+        eprintln("xuesp ctl: connect 127.0.0.1:" + strconv.itoa(port) + ": " + err.msg())
+        << 1
+    }
+    hs := "GET / HTTP/1.1\r\nHost: 127.0.0.1:" + strconv.itoa(port) + "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+    conn.write(&hs) or (err) {
+        close_cli_conn($&conn)
+        << 1
+    }
+    $buf := ""
+    while ws.header_end(&buf) < 0 {
+        chunk := conn.read(4096) or (err) {
+            close_cli_conn($&conn)
+            << 1
+        }
+        if chunk.len == 0 {
+            close_cli_conn($&conn)
+            << 1
+        }
+        buf.push_str(chunk)
+    }
+    end := ws.header_end(&buf)
+    buf = buf[end:buf.len]
+    frame := websocket.encode_frame(true, websocket.OP_TEXT, payload, true)
+    conn.write(&frame) or (err) {
+        close_cli_conn($&conn)
+        << 1
+    }
+    for {
+        m := ws.next_msg(&buf) or (err) {
+            close_cli_conn($&conn)
+            << 1
+        }
+        if m.used > 0 {
+            println(m.payload)
+            close_cli_conn($&conn)
+            << 0
+        }
+        chunk := conn.read(65536) or (err) {
+            close_cli_conn($&conn)
+            << 1
+        }
+        if chunk.len == 0 {
+            close_cli_conn($&conn)
+            << 1
+        }
+        buf.push_str(chunk)
+    }
+    close_cli_conn($&conn)
+    << 0
+}
+
+fn main() int {
+    argv := os.args()
+    if argv.len >= 2 {
+        sub := argv[1] + ""
+        if sub == "ctl" && argv.len >= 3 {
+            $ctl_port := 8765
+            $ctl_raw := argv[2] + ""
+            if argv.len >= 4 {
+                $maybe := argv[2] + ""
+                parsed := strconv.atoi(&maybe) or (err) {
+                    << 2
+                }
+                ctl_port = parsed
+                ctl_raw = argv[3] + ""
+            }
+            << ws_cli_call(ctl_port, &ctl_raw)
+        }
+        if sub == "devices" || sub == "status" {
+            $ctl_port := 8765
+            if argv.len >= 3 {
+                $maybe := argv[2] + ""
+                parsed := strconv.atoi(&maybe) or (err) {
+                    << 2
+                }
+                ctl_port = parsed
+            }
+            req := "{\"op\":\"cluster_state\"}"
+            << ws_cli_call(ctl_port, &req)
+        }
+        if sub == "mcp" {
+            $mcp_port := 8765
+            if argv.len >= 3 {
+                $raw_port := argv[2] + ""
+                parsed := strconv.atoi(&raw_port) or (err) {
+                    eprintln("xuesp mcp: bad port")
+                    << 2
+                }
+                mcp_port = parsed
+            }
+            << mcp.serve_stdio(mcp_port) or (err) { << 1 }
+        }
+    }
+
+    $rest := []string{}
+    for i in 1:argv.len {
+        rest.push(argv[i] + "")
+    }
+    cfg := config.parse_args(rest, os.home_dir()) or (err) {
+        eprintln("xuesp: " + err.msg())
+        << 2
+    }
+    if cfg.help {
+        << 0
+    }
+
+    println("XuESP v" + VERSION)
+    $devices := device.load(cfg.state_dir + "/devices.toml") or (err) {
+        eprintln("xuesp: " + err.msg())
+        << 1
+    }
+    if cfg.mqtt_host.len > 0 {
+        devices.mqtt_host = cfg.mqtt_host + ""
+    }
+    if cfg.mqtt_port > 0 {
+        devices.mqtt_port = cfg.mqtt_port
+    }
+    if cfg.http_port >= 0 {
+        devices.transfer_port = cfg.http_port
+    }
+    println("mqtt: " + devices.mqtt_host + ":" + strconv.itoa(devices.mqtt_port) + " (default " + devices.default_topic + "), devices: " + strconv.itoa(devices.devices.len))
+
+    h := hub.new_hub_with_config(cfg.state_dir + "", devices.clone())
+    h.ctl.start_status_listener()
+
+    if devices.transfer_port > 0 {
+        $web_server := web.Server{port: devices.transfer_port, xfer: h.xfer.clone(), ws_port: cfg.ctl_port}
+        if web.serve(web_server) {
+            println("transfer: http://0.0.0.0:" + strconv.itoa(devices.transfer_port) + "/transfer")
+            println("mcp: http://127.0.0.1:" + strconv.itoa(devices.transfer_port) + "/mcp")
+        }
+    }
+    if cfg.ctl_port > 0 {
+        hub.serve(cfg.ctl_port, h.clone()) or (err) {
+            eprintln("xuesp: ctl: " + err.msg())
+            << 1
+        }
+        println("ctl: ws://127.0.0.1:" + strconv.itoa(cfg.ctl_port))
+    }
+    if cfg.headless {
+        forever := chan int{cap: 1}
+        _ := <-forever
+        << 0
+    }
+    run_window(cfg.ctl_port) or (err) {
+        eprintln("xuesp: window: " + err.msg() + " (running headless)")
+        forever := chan int{cap: 1}
+        _ := <-forever
+        << 0
+    }
+    << 0
+}

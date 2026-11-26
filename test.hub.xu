@@ -1,0 +1,119 @@
+@main
+
+#os
+#strings
+#strconv
+#internal/device
+#internal/hub
+
+fn ensure_dir(dir string) {
+    _ := os.mkdir_all(dir + "") or (err) { << }
+}
+
+fn make_hub(dir string, auto bool) hub.Hub {
+    ensure_dir(dir + "")
+    $cfg := device.default_config()
+    cfg.auto_link = auto
+    << hub.new_hub_with_config(dir + "", cfg)
+}
+
+fn inject_status(h &hub.Hub, topic string, slot int, bda string, name string) string {
+    st := "{\\\"online\\\":true,\\\"advertising\\\":true,\\\"connected_count\\\":1,\\\"peers\\\":[{\\\"slot\\\":" + strconv.itoa(slot) +
+        ",\\\"bda\\\":\\\"" + bda + "\\\",\\\"name\\\":\\\"" + name + "\\\",\\\"ready\\\":true}]}"
+    raw := "{\"op\":\"ble_status\",\"mqtt_topic\":\"" + topic + "\",\"text\":\"" + st + "\"}"
+    << hub.answer(h, 1, &raw, 0)
+}
+
+fn test_hub_cluster_state_and_resolve() {
+    h := make_hub("/tmp/xuesp-test-resolve", true)
+    got := inject_status(&h, "xu/esp32/node-a", 1, "AA:BB:CC:DD:EE:01", "Mr.Router")
+    assert(strings.contains(&got, "\"op\":\"cluster_state\""))
+    assert(strings.contains(&got, "\"mqtt_topic\":\"xu/esp32/node-a\""))
+    assert(strings.contains(&got, "\"id\":\"peer-ee01\""))
+
+    by_name := "Mr.Router"
+    rt1 := h.resolve_target(&by_name)
+    assert(rt1.found && rt1.topic == "xu/esp32/node-a" && rt1.slot == 1)
+
+    by_slot := "xu/esp32/node-b#2"
+    rt2 := h.resolve_target(&by_slot)
+    assert(rt2.found && rt2.topic == "xu/esp32/node-b" && rt2.slot == 2)
+
+    empty := ""
+    rt3 := h.resolve_target(&empty)
+    assert(rt3.found && rt3.ble_peer == "AA:BB:CC:DD:EE:01")
+}
+
+fn test_hub_autolink_heals_moved_peer() {
+    dir := "/tmp/xuesp-test-heal"
+    ensure_dir(dir + "")
+    $cfg := device.default_config()
+    cfg.devices.push(device.Device{
+        id: "phone-a",
+        phone_name: "Mr.Router",
+        mqtt_topic: "xu/esp32/old-node",
+        ble_peer: "",
+        ble_slot: 0,
+        home: "button2",
+        group: "default"
+    })
+    h := hub.new_hub_with_config(dir + "", cfg)
+    _ := inject_status(&h, "xu/esp32/new-node", 3, "AA:BB:CC:DD:EE:03", "Mr.Router")
+    healed := h.get_config()
+    assert(healed.devices.len == 1)
+    assert(healed.devices[0].mqtt_topic == "xu/esp32/new-node")
+    assert(healed.devices[0].ble_slot == 3)
+    assert(healed.devices[0].ble_peer == "AA:BB:CC:DD:EE:03")
+    saved := os.read(dir + "/devices.toml") or (err) {
+        assert(false)
+        <<
+    }
+    assert(strings.contains(&saved, "mqtt_topic = \"xu/esp32/new-node\""))
+}
+
+fn test_hub_macros_and_provision_lifecycle() {
+    h := make_hub("/tmp/xuesp-test-macros", true)
+    list_req := "{\"op\":\"macro_list\"}"
+    list_res := hub.answer(&h, 1, &list_req, 0)
+    assert(strings.contains(&list_res, "\"open_url\""))
+
+    save_req := "{\"op\":\"macro_save\",\"name\":\"ping_home\",\"goal\":\"Ping Home\",\"text\":\"home && wait 100\"}"
+    save_res := hub.answer(&h, 2, &save_req, 0)
+    assert(strings.contains(&save_res, "\"steps\":2"))
+
+    del_req := "{\"op\":\"macro_delete\",\"name\":\"ping_home\"}"
+    del_res := hub.answer(&h, 3, &del_req, 0)
+    assert(strings.contains(&del_res, "\"ok\":true"))
+
+    scan_req := "{\"op\":\"provision_scan\"}"
+    scan_res := hub.answer(&h, 4, &scan_req, 0)
+    assert(strings.contains(&scan_res, "\"action\":\"provision_scan\""))
+
+    res_req := "{\"op\":\"provision_result\",\"action\":\"scan\",\"state\":\"done\",\"devices\":[]}"
+    _ := hub.answer(&h, 5, &res_req, 0)
+    st_req := "{\"op\":\"provision_status\"}"
+    st_res := hub.answer(&h, 6, &st_req, 0)
+    assert(strings.contains(&st_res, "\"op\":\"provision_result\""))
+}
+
+fn expect_bad_hub_req(raw &string) {
+    hub.parse_request(raw) or (err) {
+        assert(err.msg() == "bad_request")
+        <<
+    }
+    assert(false)
+}
+
+fn test_hub_parse_request_rejects_ocr_ops() {
+    good := "{\"op\":\"tap\",\"device\":\"phone-a\",\"x\":100,\"y\":200}"
+    r := hub.parse_request(&good) or (err) {
+        assert(false)
+        <<
+    }
+    assert(r.op == "tap" && r.x == 100 && r.y == 200)
+
+    for bad_op in ["screen", "snapshot", "health"] {
+        raw := "{\"op\":\"" + bad_op + "\"}"
+        expect_bad_hub_req(&raw)
+    }
+}

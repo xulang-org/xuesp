@@ -1,0 +1,27 @@
+@main
+
+#internal/web
+#internal/mcp
+#strconv
+#strings
+
+fn test_web_http_parsing_and_wire() {
+    body := "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}"
+    full := "POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: " + strconv.itoa(body.len) + "\r\n\r\n" + body
+    assert(web.request_complete(&full))
+    assert(web.body_of(&full) == body)
+    head_only := full[0:full.len - body.len]
+    assert(!web.request_complete(&head_only))
+    wire := web.http_json("{}")
+    assert(strings.has_prefix(&wire, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}"))
+}
+
+fn test_mcp_tools_list() {
+    req := "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}"
+    resp := mcp.handle_jsonrpc(&req, 8765)
+    assert(strings.contains(&resp, "xuesp_list_cluster"))
+    assert(strings.contains(&resp, "xuesp_bind_device"))
+    assert(strings.contains(&resp, "xuesp_exec_command"))
+    assert(strings.contains(&resp, "xuesp_provision_esp32"))
+    assert(!strings.contains(&resp, "perceive"))
+}

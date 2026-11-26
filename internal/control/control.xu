@@ -1,0 +1,659 @@
+@internal/control
+
+#net
+#os
+#os/exec
+#strconv
+#strings
+#time
+#encoding/json
+
+pub struct BlePeer {
+    pub mqtt_topic string
+    pub slot int
+    pub bda string
+    pub name string
+    pub ready bool
+}
+
+pub fn (p &BlePeer) clone_peer() BlePeer {
+    << BlePeer{mqtt_topic: p.mqtt_topic + "", slot: p.slot, bda: p.bda + "", name: p.name + "", ready: p.ready}
+}
+
+pub struct EspNode {
+    pub mqtt_topic string
+    pub online bool
+    pub connected_count int
+    pub advertising bool
+    pub peers []BlePeer
+}
+
+pub fn (n &EspNode) clone_node() EspNode {
+    $ps := []BlePeer{}
+    for i in 0:n.peers.len {
+        ps.push(n.peers[i].clone_peer())
+    }
+    << EspNode{mqtt_topic: n.mqtt_topic + "", online: n.online, connected_count: n.connected_count, advertising: n.advertising, peers: ps}
+}
+
+pub struct CtrlCfg {
+    pub host string
+    pub port int
+    pub default_topic string
+}
+
+pub struct Controller {
+    cfg_box chan CtrlCfg
+    lock chan int
+    seq chan int
+    peers_box chan []BlePeer
+    nodes_box chan []EspNode
+}
+
+pub fn new_controller(host string, port int, default_topic string) Controller {
+    cfg_box := chan CtrlCfg{cap: 1}
+    cfg_box <- CtrlCfg{host: host, port: port, default_topic: default_topic}
+    lock := chan int{cap: 1}
+    lock <- 1
+    seq := chan int{cap: 1}
+    seq <- 1
+    peers_box := chan []BlePeer{cap: 1}
+    peers_box <- []BlePeer{}
+    nodes_box := chan []EspNode{cap: 1}
+    nodes_box <- []EspNode{}
+    << Controller{cfg_box: cfg_box, lock: lock, seq: seq, peers_box: peers_box, nodes_box: nodes_box}
+}
+
+pub fn (c &Controller) clone() Controller {
+    << Controller{cfg_box: c.cfg_box, lock: c.lock, seq: c.seq, peers_box: c.peers_box, nodes_box: c.nodes_box}
+}
+
+fn (c &Controller) get_cfg() CtrlCfg {
+    v := <-c.cfg_box
+    out := CtrlCfg{host: v.host + "", port: v.port, default_topic: v.default_topic + ""}
+    c.cfg_box <- v
+    << out
+}
+
+fn (c &Controller) next_id(prefix string) string {
+    n := <-c.seq
+    c.seq <- n + 1
+    << prefix + "-" + strconv.itoa(n)
+}
+
+pub fn (c &Controller) peers() []BlePeer {
+    list := <-c.peers_box
+    $copy := []BlePeer{}
+    for p in list {
+        copy.push(BlePeer{mqtt_topic: p.mqtt_topic + "", slot: p.slot, bda: p.bda + "", name: p.name + "", ready: p.ready})
+    }
+    c.peers_box <- list
+    << copy
+}
+
+pub fn (c &Controller) nodes() []EspNode {
+    list := <-c.nodes_box
+    $copy := []EspNode{}
+    for nd in list {
+        $ps := []BlePeer{}
+        for p in nd.peers {
+            ps.push(BlePeer{mqtt_topic: p.mqtt_topic + "", slot: p.slot, bda: p.bda + "", name: p.name + "", ready: p.ready})
+        }
+        copy.push(EspNode{mqtt_topic: nd.mqtt_topic + "", online: nd.online, connected_count: nd.connected_count, advertising: nd.advertising, peers: ps})
+    }
+    c.nodes_box <- list
+    << copy
+}
+
+fn jstr(doc &json.Doc, n int) string {
+    if n < 0 || !doc.is_string(n) {
+        << ""
+    }
+    << doc.as_string(n) or (err) {
+        << ""
+    }
+}
+
+fn jbool(doc &json.Doc, n int) bool {
+    if n < 0 || !doc.is_bool(n) {
+        << false
+    }
+    << doc.as_bool(n) or (err) {
+        << false
+    }
+}
+
+pub fn (c &Controller) update_peers_from_status(topic &string, status_json &string) {
+    doc := json.parse(status_json)
+    if !doc.ok() || !doc.is_dict(doc.root()) {
+        <<
+    }
+    root := doc.root()
+    online := jbool(&doc, doc.get(root, "online"))
+    adv := jbool(&doc, doc.get(root, "advertising"))
+    $cc := 0
+    ccn := doc.get(root, "connected_count")
+    if ccn >= 0 && doc.is_number(ccn) {
+        cc = doc.number_int(ccn)
+    }
+    pn := doc.get(root, "peers")
+    $node_peers := []BlePeer{}
+    if pn >= 0 && doc.is_list(pn) {
+        count := doc.count(pn)
+        for i in 0:count {
+            en := doc.at(pn, i)
+            if !doc.is_dict(en) {
+                ->
+            }
+            sn := doc.get(en, "slot")
+            $slot := i
+            if sn >= 0 && doc.is_number(sn) {
+                slot = doc.number_int(sn)
+            }
+            bda := jstr(&doc, doc.get(en, "bda"))
+            name := jstr(&doc, doc.get(en, "name"))
+            ready := jbool(&doc, doc.get(en, "ready"))
+            node_peers.push(BlePeer{mqtt_topic: *topic + "", slot: slot, bda: bda, name: name, ready: ready})
+        }
+    }
+    old := <-c.peers_box
+    $kept := []BlePeer{}
+    for p in old {
+        if p.mqtt_topic != *topic {
+            kept.push(BlePeer{mqtt_topic: p.mqtt_topic + "", slot: p.slot, bda: p.bda + "", name: p.name + "", ready: p.ready})
+        }
+    }
+    for np in node_peers {
+        kept.push(BlePeer{mqtt_topic: np.mqtt_topic + "", slot: np.slot, bda: np.bda + "", name: np.name + "", ready: np.ready})
+    }
+    c.peers_box <- kept
+
+    old_nodes := <-c.nodes_box
+    $next_nodes := []EspNode{}
+    for nd in old_nodes {
+        if nd.mqtt_topic != *topic {
+            $ps := []BlePeer{}
+            for p in nd.peers {
+                ps.push(BlePeer{mqtt_topic: p.mqtt_topic + "", slot: p.slot, bda: p.bda + "", name: p.name + "", ready: p.ready})
+            }
+            next_nodes.push(EspNode{mqtt_topic: nd.mqtt_topic + "", online: nd.online, connected_count: nd.connected_count, advertising: nd.advertising, peers: ps})
+        }
+    }
+    next_nodes.push(EspNode{mqtt_topic: *topic + "", online: online, connected_count: cc, advertising: adv, peers: node_peers})
+    c.nodes_box <- next_nodes
+}
+
+pub fn mouse_report(buttons int, x int, y int) string {
+    $cx := x
+    $cy := y
+    if cx < 0 { cx = 0 }
+    if cx > 32767 { cx = 32767 }
+    if cy < 0 { cy = 0 }
+    if cy > 32767 { cy = 32767 }
+    xl := cx & 255
+    xh := (cx >> 8) & 127
+    yl := cy & 255
+    yh := (cy >> 8) & 127
+    << "[" + strconv.itoa(buttons & 7) + "," + strconv.itoa(xl) + "," + strconv.itoa(xh) + "," + strconv.itoa(yl) + "," + strconv.itoa(yh) + "]"
+}
+
+pub fn keyboard_report(mod int, keycode int) string {
+    << "[" + strconv.itoa(mod & 255) + ",0," + strconv.itoa(keycode & 255) + ",0,0,0,0,0]"
+}
+
+pub fn format_cmd(id &string, op &string, target int, report &string) string {
+    $out := "{\"id\":\"" + *id + "\",\"op\":\"" + *op + "\""
+    if target >= 0 && target <= 3 {
+        out.push_str(",\"target\":" + strconv.itoa(target))
+    }
+    if report.len > 0 {
+        out.push_str(",\"report\":" + *report)
+    }
+    out.push_str("}")
+    << out
+}
+
+fn close_conn(c $&net.Conn) {
+    c.close() or (err) { << }
+}
+
+// send_batch opens a fast local TCP connection to Mosquitto, publishes one or
+// more atomic commands in sequence, and closes cleanly.
+pub fn (c &Controller) send_batch(topic &string, payloads &[]string, gap_ms int) bool {
+    _ := <-c.lock
+    cfg := c.get_cfg()
+    $t := *topic + ""
+    if t.len == 0 {
+        t = cfg.default_topic + ""
+    }
+    cmd_topic := t + "/cmd"
+    addr := cfg.host + ":" + strconv.itoa(cfg.port)
+    $conn := net.dial_timeout("tcp", addr, 2000000000) or (err) {
+        c.lock <- 1
+        << false
+    }
+    cid := c.next_id("xuesp")
+    conn_pkt := encode_connect(&cid, 30)
+    conn.write(&conn_pkt) or (err) {
+        close_conn($&conn)
+        c.lock <- 1
+        << false
+    }
+    _ := conn.read(4) or (err) {
+        close_conn($&conn)
+        c.lock <- 1
+        << false
+    }
+    for i in 0:payloads.len {
+        if i > 0 && gap_ms > 0 {
+            time.sleep(gap_ms * 1000000)
+        }
+        p := payloads[i]
+        pkt := encode_publish(&cmd_topic, &p)
+        conn.write(&pkt) or (err) {
+            close_conn($&conn)
+            c.lock <- 1
+            << false
+        }
+    }
+    close_conn($&conn)
+    c.lock <- 1
+    << true
+}
+
+pub fn (c &Controller) mouse_event(topic &string, target int, btn int, x int, y int) bool {
+    id := c.next_id("me")
+    op := "hid.mouse"
+    r := mouse_report(btn, x, y)
+    cmd := format_cmd(&id, &op, target, &r)
+    $cmds := []string{}
+    cmds.push(cmd)
+    << c.send_batch(topic, &cmds, 0)
+}
+
+pub fn (c &Controller) key_event(topic &string, target int, down bool, mod int, code int) bool {
+    id := c.next_id("ke")
+    op := "hid.keyboard"
+    $r := "[0,0,0,0,0,0,0,0]"
+    if down {
+        r = "[" + strconv.itoa(mod & 255) + ",0," + strconv.itoa(code & 255) + ",0,0,0,0,0]"
+    }
+    cmd := format_cmd(&id, &op, target, &r)
+    $cmds := []string{}
+    cmds.push(cmd)
+    << c.send_batch(topic, &cmds, 0)
+}
+
+pub fn (c &Controller) tap(topic &string, target int, x int, y int) bool {
+    id0 := c.next_id("tapm")
+    id1 := c.next_id("tapd")
+    id2 := c.next_id("tapu")
+    op := "hid.mouse"
+    r_move := mouse_report(0, x, y)
+    r_down := mouse_report(1, x, y)
+    r_up := mouse_report(0, x, y)
+    $cmds := []string{}
+    cmds.push(format_cmd(&id0, &op, target, &r_move))
+    cmds.push(format_cmd(&id1, &op, target, &r_down))
+    cmds.push(format_cmd(&id2, &op, target, &r_up))
+    << c.send_batch(topic, &cmds, 85)
+}
+
+pub fn (c &Controller) double_tap(topic &string, target int, x int, y int) bool {
+    if !c.tap(topic, target, x, y) {
+        << false
+    }
+    time.sleep(90000000)
+    << c.tap(topic, target, x, y)
+}
+
+pub fn (c &Controller) long_press(topic &string, target int, x int, y int, duration_ms int) bool {
+    $dur := duration_ms
+    if dur < 400 { dur = 650 }
+    if dur > 4000 { dur = 4000 }
+    id0 := c.next_id("lpm")
+    id1 := c.next_id("lpd")
+    id2 := c.next_id("lpu")
+    op := "hid.mouse"
+    r_move := mouse_report(0, x, y)
+    r_down := mouse_report(1, x, y)
+    r_up := mouse_report(0, x, y)
+    $cmds_down := []string{}
+    cmds_down.push(format_cmd(&id0, &op, target, &r_move))
+    cmds_down.push(format_cmd(&id1, &op, target, &r_down))
+    if !c.send_batch(topic, &cmds_down, 35) {
+        << false
+    }
+    time.sleep(dur * 1000000)
+    $cmds_up := []string{}
+    cmds_up.push(format_cmd(&id2, &op, target, &r_up))
+    << c.send_batch(topic, &cmds_up, 0)
+}
+
+pub fn (c &Controller) set_screen_size(topic &string, target int, w int, h int) bool {
+    id := c.next_id("scrsz")
+    op := "screen.size"
+    wl := w & 255
+    wh := (w >> 8) & 255
+    hl := h & 255
+    hh := (h >> 8) & 255
+    r := "[" + strconv.itoa(wl) + "," + strconv.itoa(wh) + "," + strconv.itoa(hl) + "," + strconv.itoa(hh) + "]"
+    cmd := format_cmd(&id, &op, target, &r)
+    $cmds := []string{}
+    cmds.push(cmd)
+    << c.send_batch(topic, &cmds, 0)
+}
+
+pub fn (c &Controller) set_advertising(topic &string, enable bool) bool {
+    id := c.next_id("adv")
+    $en := "false"
+    if enable { en = "true" }
+    cmd := "{\"id\":\"" + id + "\",\"op\":\"ble.adv\",\"enable\":" + en + "}"
+    $cmds := []string{}
+    cmds.push(cmd)
+    << c.send_batch(topic, &cmds, 0)
+}
+
+// reset_wifi asks the node to drop its stored network settings and reboot
+// into BLE provisioning mode.
+pub fn (c &Controller) reset_wifi(topic &string) bool {
+    id := c.next_id("rst")
+    op := "wifi.reset"
+    empty := ""
+    $cmds := []string{}
+    cmds.push(format_cmd(&id, &op, -1, &empty))
+    << c.send_batch(topic, &cmds, 0)
+}
+
+pub fn (c &Controller) disconnect_peer(topic &string, target int) bool {
+    id := c.next_id("disc")
+    op := "ble.disconnect"
+    empty := ""
+    $cmds := []string{}
+    cmds.push(format_cmd(&id, &op, target, &empty))
+    << c.send_batch(topic, &cmds, 0)
+}
+
+pub fn (c &Controller) click_button(topic &string, target int, btn int, x int, y int) bool {
+    id1 := c.next_id("btnd")
+    id2 := c.next_id("btnu")
+    op := "hid.mouse"
+    mask := 1 << (btn - 1)
+    r_down := mouse_report(mask, x, y)
+    r_up := mouse_report(0, x, y)
+    $cmds := []string{}
+    cmds.push(format_cmd(&id1, &op, target, &r_down))
+    cmds.push(format_cmd(&id2, &op, target, &r_up))
+    << c.send_batch(topic, &cmds, 55)
+}
+
+// swipe executes a single-connection BLE HID drag gesture from (x1,y1) to
+// (x2,y2): move to start, press, hold briefly (one extra report at x1,y1 so
+// iOS registers touch-down without triggering long-press), interpolate across
+// the path, and release immediately at the end so scroll/page-turn inertia is
+// preserved.
+pub fn (c &Controller) swipe(topic &string, target int, x1 int, y1 int, x2 int, y2 int, duration_ms int) bool {
+    $steps := 6
+    if duration_ms > 400 {
+        steps = 8
+    }
+    op := "hid.mouse"
+    $cmds := []string{}
+    idm0 := c.next_id("swp")
+    rm0 := mouse_report(0, x1, y1)
+    cmds.push(format_cmd(&idm0, &op, target, &rm0))
+
+    id0 := c.next_id("swd")
+    r0 := mouse_report(1, x1, y1)
+    cmds.push(format_cmd(&id0, &op, target, &r0))
+
+    id1 := c.next_id("swh")
+    r1 := mouse_report(1, x1, y1)
+    cmds.push(format_cmd(&id1, &op, target, &r1))
+
+    for i in 1:steps + 1 {
+        xi := x1 + ((x2 - x1) * i) / steps
+        yi := y1 + ((y2 - y1) * i) / steps
+        idm := c.next_id("swm")
+        rm := mouse_report(1, xi, yi)
+        cmds.push(format_cmd(&idm, &op, target, &rm))
+    }
+
+    idu := c.next_id("swu")
+    ru := mouse_report(0, x2, y2)
+    cmds.push(format_cmd(&idu, &op, target, &ru))
+
+    $g := duration_ms / (steps + 3)
+    if g < 28 { g = 28 }
+    if g > 55 { g = 55 }
+    << c.send_batch(topic, &cmds, g)
+}
+
+pub fn (c &Controller) send_key_code(topic &string, target int, mod int, code int) bool {
+    id1 := c.next_id("kd")
+    id2 := c.next_id("ku")
+    op := "hid.keyboard"
+    r_down := keyboard_report(mod, code)
+    r_up := keyboard_report(0, 0)
+    $cmds := []string{}
+    cmds.push(format_cmd(&id1, &op, target, &r_down))
+    cmds.push(format_cmd(&id2, &op, target, &r_up))
+    << c.send_batch(topic, &cmds, 30)
+}
+
+pub fn (c &Controller) send_consumer(topic &string, target int, mask int) bool {
+    id1 := c.next_id("cd")
+    id2 := c.next_id("cu")
+    op := "hid.consumer"
+    r_down := "[" + strconv.itoa(mask & 31) + "]"
+    r_up := "[0]"
+    $cmds := []string{}
+    cmds.push(format_cmd(&id1, &op, target, &r_down))
+    cmds.push(format_cmd(&id2, &op, target, &r_up))
+    << c.send_batch(topic, &cmds, 45)
+}
+
+fn ascii_to_hid_mod(ch int) int {
+    if ch >= 65 && ch <= 90 { << 2 }
+    if ch == 33 || ch == 64 || ch == 35 || ch == 36 || ch == 37 || ch == 94 || ch == 38 || ch == 42 || ch == 40 || ch == 41 { << 2 }
+    if ch == 95 || ch == 43 || ch == 58 || ch == 34 || ch == 60 || ch == 62 || ch == 63 { << 2 }
+    << 0
+}
+
+fn ascii_to_hid_code(ch int) int {
+    if ch >= 97 && ch <= 122 { << 4 + (ch - 97) }
+    if ch >= 65 && ch <= 90 { << 4 + (ch - 65) }
+    if ch >= 49 && ch <= 57 { << 30 + (ch - 49) }
+    if ch == 48 { << 39 }
+    if ch == 32 { << 44 }
+    if ch == 45 || ch == 95 { << 45 }
+    if ch == 61 || ch == 43 { << 46 }
+    if ch == 91 { << 47 }
+    if ch == 93 { << 48 }
+    if ch == 92 { << 49 }
+    if ch == 59 || ch == 58 { << 51 }
+    if ch == 39 || ch == 34 { << 52 }
+    if ch == 44 || ch == 60 { << 54 }
+    if ch == 46 || ch == 62 { << 55 }
+    if ch == 47 || ch == 63 { << 56 }
+    if ch == 33 { << 30 }
+    if ch == 64 { << 31 }
+    if ch == 35 { << 32 }
+    if ch == 36 { << 33 }
+    if ch == 37 { << 34 }
+    if ch == 94 { << 35 }
+    if ch == 38 { << 36 }
+    if ch == 42 { << 37 }
+    if ch == 40 { << 38 }
+    if ch == 41 { << 39 }
+    << 0
+}
+
+fn run_pbcopy(tmp string) {
+    $cmd := exec.command("/bin/sh", "-c", "/usr/bin/pbcopy < " + tmp)
+    _ := cmd.run() or (err) { << }
+}
+
+pub fn (c &Controller) clear_focused_input(topic &string, target int) bool {
+    // Select all (Cmd+A: mod=8, key=4) then Backspace (key=42)
+    _ := c.send_key_code(topic, target, 8, 4)
+    time.sleep(60000000)
+    << c.send_key_code(topic, target, 0, 42)
+}
+
+pub fn (c &Controller) type_ascii_hid(topic &string, target int, text &string) bool {
+    _ := c.clear_focused_input(topic, target)
+    time.sleep(80000000)
+    op := "hid.keyboard"
+    r_up := keyboard_report(0, 0)
+    $batch := []string{}
+    for i in 0:text.len {
+        ch := text[i] & 255
+        code := ascii_to_hid_code(ch)
+        if code <= 0 {
+            ->
+        }
+        mod := ascii_to_hid_mod(ch)
+        id_d := c.next_id("tkd")
+        id_u := c.next_id("tku")
+        r_down := keyboard_report(mod, code)
+        batch.push(format_cmd(&id_d, &op, target, &r_down))
+        batch.push(format_cmd(&id_u, &op, target, &r_up))
+        if batch.len >= 10 {
+            if !c.send_batch(topic, &batch, 24) {
+                << false
+            }
+            batch = []string{}
+            time.sleep(60000000)
+        }
+    }
+    if batch.len > 0 {
+        if !c.send_batch(topic, &batch, 24) {
+            << false
+        }
+    }
+    << true
+}
+
+pub fn (c &Controller) paste_shortcut(topic &string, target int, text &string) bool {
+    // Write to macOS clipboard for Universal Clipboard, and trigger Cmd+V
+    tmp := os.temp_dir() + "/xuesp_clip.txt"
+    os.write(tmp + "", *text + "") or (err) {
+        << false
+    }
+    run_pbcopy(tmp)
+    time.sleep(300000000)
+    // Cmd (0x08) + V (0x19 = 25)
+    << c.send_key_code(topic, target, 8, 25)
+}
+
+pub fn (c &Controller) type_ascii_or_paste(topic &string, target int, text &string) bool {
+    for i in 0:text.len {
+        ch := text[i] & 255
+        if ch < 32 || ch > 126 {
+            << c.paste_shortcut(topic, target, text)
+        }
+    }
+    // For pure ASCII (URLs, search terms, app names), type directly via BLE HID Keyboard
+    // so it works on all iPhones without requiring macOS Universal Clipboard!
+    << c.type_ascii_hid(topic, target, text)
+}
+
+pub fn (c &Controller) focus_url(topic &string, target int) bool {
+    // Cmd+L (mod=8, key=15) focuses the address bar in Safari and Chrome on iOS
+    << c.send_key_code(topic, target, 8, 15)
+}
+
+pub fn (c &Controller) new_tab(topic &string, target int) bool {
+    // Cmd+T (mod=8, key=23) opens a new tab and focuses the address bar in Safari and Chrome
+    << c.send_key_code(topic, target, 8, 23)
+}
+
+pub fn (c &Controller) spotlight(topic &string, target int) bool {
+    // Cmd+Space (mod=8, key=44) opens iOS Spotlight Search from any screen
+    ok := c.send_key_code(topic, target, 8, 44)
+    time.sleep(350000000)
+    _ := c.clear_focused_input(topic, target)
+    << ok
+}
+
+pub fn (c &Controller) back(topic &string, target int) bool {
+    // iOS edge-swipe back: from left edge (x=300) to right (x=18000) at mid-screen (y=16384)
+    << c.swipe(topic, target, 300, 16384, 18000, 16384, 240)
+}
+
+pub fn (c &Controller) home(topic &string, target int, home_cfg &string) bool {
+    // 1. Send HID Consumer Control Home (0x0040 -> mask 16) for home-button devices
+    ok_cons := c.send_consumer(topic, target, 16)
+    if strings.has_prefix(home_cfg, "assistive:") {
+        coords := home_cfg[10:home_cfg.len]
+        parts := strings.split(&coords, ",")
+        if parts.len == 2 {
+            ax := strconv.atoi(&parts[0]) or (err) { << ok_cons }
+            ay := strconv.atoi(&parts[1]) or (err) { << ok_cons }
+            if !c.tap(topic, target, ax, ay) {
+                << ok_cons
+            }
+            time.sleep(450000000)
+            << c.tap(topic, target, 16384, 24200)
+        }
+    }
+    // 2. Also send bottom-edge swipe up for bezel-less iPhones (iPhone X - 16)
+    time.sleep(100000000)
+    _ := c.swipe(topic, target, 16384, 32500, 16384, 18000, 220)
+    << ok_cons
+}
+
+pub fn (c &Controller) release_all(topic &string, target int) bool {
+    id := c.next_id("rel")
+    op := "release.all"
+    empty := ""
+    $cmds := []string{}
+    cmds.push(format_cmd(&id, &op, target, &empty))
+    << c.send_batch(topic, &cmds, 0)
+}
+
+fn status_loop(c Controller) {
+    for {
+        cfg := c.get_cfg()
+        addr := cfg.host + ":" + strconv.itoa(cfg.port)
+        $conn := net.dial_timeout("tcp", addr, 2000000000) or (err) {
+            time.sleep(3000000000)
+            ->
+        }
+        cid := c.next_id("xuespstatus")
+        cpkt := encode_connect(&cid, 60)
+        conn.write(&cpkt) or (err) {
+            close_conn($&conn)
+            time.sleep(3000000000)
+            ->
+        }
+        _ := conn.read(4) or (err) {
+            close_conn($&conn)
+            time.sleep(3000000000)
+            ->
+        }
+        sub_filter := "xu/esp32/+/status"
+        spkt := encode_subscribe(1, &sub_filter)
+        conn.write(&spkt) or (err) {
+            close_conn($&conn)
+            time.sleep(3000000000)
+            ->
+        }
+        for {
+            msg := read_packet($&conn) or (err) {
+                <-
+            }
+            if msg.valid && strings.has_suffix(&msg.topic, "/status") {
+                base_topic := msg.topic[0:msg.topic.len - 7] + ""
+                c.update_peers_from_status(&base_topic, &msg.payload)
+            }
+        }
+        close_conn($&conn)
+        time.sleep(2000000000)
+    }
+}
+
+pub fn (c &Controller) start_status_listener() {
+    xu status_loop(c.clone())
+}

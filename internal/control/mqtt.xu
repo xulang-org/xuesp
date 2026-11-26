@@ -1,0 +1,124 @@
+@internal/control
+
+#net
+#errors
+#strings
+
+pub struct MqttMsg {
+    pub valid bool
+    pub topic string
+    pub payload string
+}
+
+fn encode_varlen(b $&strings.ByteBuilder, length int) {
+    $x := length
+    for {
+        $digit := x & 127
+        x = x >> 7
+        if x > 0 {
+            digit = digit | 128
+        }
+        b.write_byte(digit)
+        if x <= 0 {
+            <-
+        }
+    }
+}
+
+fn write_utf8(b $&strings.ByteBuilder, s &string) {
+    n := s.len
+    b.write_byte((n >> 8) & 255)
+    b.write_byte(n & 255)
+    b.write_str(*s + "")
+}
+
+pub fn encode_connect(client_id &string, keepalive_s int) string {
+    $vh := strings.new_byte_builder(32 + client_id.len)
+    proto := "MQTT"
+    write_utf8($&vh, &proto)
+    vh.write_byte(4)
+    vh.write_byte(2)
+    vh.write_byte((keepalive_s >> 8) & 255)
+    vh.write_byte(keepalive_s & 255)
+    write_utf8($&vh, client_id)
+    body := vh.to_string()
+    $pkt := strings.new_byte_builder(8 + body.len)
+    pkt.write_byte(0x10)
+    encode_varlen($&pkt, body.len)
+    pkt.write_str(body)
+    << pkt.to_string()
+}
+
+pub fn encode_subscribe(pkt_id int, topic &string) string {
+    $vh := strings.new_byte_builder(8 + topic.len)
+    vh.write_byte((pkt_id >> 8) & 255)
+    vh.write_byte(pkt_id & 255)
+    write_utf8($&vh, topic)
+    vh.write_byte(0)
+    body := vh.to_string()
+    $pkt := strings.new_byte_builder(8 + body.len)
+    pkt.write_byte(0x82)
+    encode_varlen($&pkt, body.len)
+    pkt.write_str(body)
+    << pkt.to_string()
+}
+
+pub fn encode_publish(topic &string, payload &string) string {
+    $vh := strings.new_byte_builder(4 + topic.len + payload.len)
+    write_utf8($&vh, topic)
+    vh.write_str(*payload + "")
+    body := vh.to_string()
+    $pkt := strings.new_byte_builder(8 + body.len)
+    pkt.write_byte(0x30)
+    encode_varlen($&pkt, body.len)
+    pkt.write_str(body)
+    << pkt.to_string()
+}
+
+pub fn encode_pingreq() string {
+    $pkt := strings.new_byte_builder(2)
+    pkt.write_byte(0xC0)
+    pkt.write_byte(0x00)
+    << pkt.to_string()
+}
+
+fn read_exact(c $&net.Conn, n int) string {
+    $out := ""
+    while out.len < n {
+        chunk := c.read(n - out.len) or >>
+        if chunk.len == 0 {
+            >> errors.new("mqtt: eof")
+        }
+        out.push_str(chunk)
+    }
+    << out
+}
+
+pub fn read_packet(c $&net.Conn) MqttMsg {
+    head := read_exact(c, 1) or >>
+    kind := (head[0] & 255) >> 4
+    $mul := 1
+    $rem := 0
+    for i in 0:4 {
+        b_str := read_exact(c, 1) or >>
+        b := b_str[0] & 255
+        rem += (b & 127) * mul
+        if (b & 128) == 0 {
+            <-
+        }
+        mul = mul * 128
+    }
+    $body := ""
+    if rem > 0 {
+        body = read_exact(c, rem) or >>
+    }
+    if kind == 3 && body.len >= 2 {
+        tlen := ((body[0] & 255) << 8) | (body[1] & 255)
+        if 2 + tlen <= body.len {
+            topic := body[2:2 + tlen] + ""
+            payload := body[2 + tlen:body.len] + ""
+            << MqttMsg{valid: true, topic: topic, payload: payload}
+        }
+    }
+    << MqttMsg{valid: false, topic: "", payload: ""}
+}

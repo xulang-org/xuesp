@@ -1,0 +1,221 @@
+@internal/web
+
+#net
+#os
+#strconv
+#strings
+#encoding/json
+#internal/transfer
+#internal/mcp
+
+// Server is the studio HTTP surface. The file and clipboard transfer
+// centre and the MCP endpoint share one listener, so the MCP endpoint
+// lives on the transfer port under /mcp.
+pub struct Server {
+    pub port int
+    pub xfer transfer.Hub
+    pub ws_port int
+}
+
+pub fn (s &Server) clone() Server {
+    << Server{port: s.port, xfer: s.xfer.clone(), ws_port: s.ws_port}
+}
+
+fn close_conn(c $&net.Conn) {
+    c.close() or (err) { << }
+}
+
+fn write_conn(c $&net.Conn, msg &string) {
+    c.write(msg) or (err) { << }
+}
+
+fn mkdir_quiet(dir string) {
+    os.mkdir_all(dir) or (err) { << }
+}
+
+// An MCP call can carry a screen capture or a long macro, so the body is
+// allowed to be much larger than one socket read. Anything above this is
+// rejected instead of being buffered without bound.
+const MAX_BODY = 8388608
+
+pub fn header_end(req &string) int {
+    i := strings.index_of(req, "\r\n\r\n")
+    if i < 0 {
+        << -1
+    }
+    << i + 4
+}
+
+pub fn content_length(head &string) int {
+    $found := 0
+    for line in strings.split(head, "\r\n") {
+        lower := strings.to_lower(&line)
+        if strings.has_prefix(&lower, "content-length:") {
+            v := line[15:line.len]
+            n_text := strings.trim_space(&v)
+            n := strconv.atoi(&n_text) or (err) {
+                ->
+            }
+            found = n
+        }
+    }
+    << found
+}
+
+pub fn declared_body(req &string) int {
+    end := header_end(req)
+    if end < 0 {
+        << 0
+    }
+    head := req[0:end]
+    << content_length(&head)
+}
+
+// request_complete is true once the headers and the whole declared body have
+// arrived. A TCP read is not a message boundary: a client may send the head
+// and the body in separate packets.
+pub fn request_complete(req &string) bool {
+    end := header_end(req)
+    if end < 0 {
+        << false
+    }
+    need := declared_body(req)
+    << req.len >= end + need
+}
+
+pub fn body_of(req &string) string {
+    end := header_end(req)
+    if end < 0 {
+        << ""
+    }
+    need := declared_body(req)
+    if need > 0 && end + need <= req.len {
+        << req[end:end + need] + ""
+    }
+    << req[end:req.len] + ""
+}
+
+pub fn http_json(body string) string {
+    << "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + strconv.itoa(body.len) + "\r\n\r\n" + body
+}
+
+// read_request collects one full HTTP request before the handler looks at it.
+fn read_request(c $&net.Conn) string {
+    $buf := ""
+    for {
+        chunk := c.read(65536) or (err) {
+            << buf
+        }
+        if chunk.len == 0 {
+            << buf
+        }
+        buf.push_str(chunk)
+        end := header_end(&buf)
+        if end < 0 {
+            if buf.len > 65536 {
+                << ""
+            }
+            ->
+        }
+        // Let the handler answer 413 rather than waiting forever for a body
+        // it will never accept.
+        if declared_body(&buf) > MAX_BODY {
+            << buf
+        }
+        if request_complete(&buf) {
+            << buf
+        }
+    }
+}
+
+fn no_sigpipe(conn &net.Conn) {
+    fd := conn.descriptor() or (e) { << }
+    _ := os.setsockopt_int(fd, 65535, 4130, 1) or (e) { << }
+}
+
+fn handle(conn net.Conn, s Server) {
+    $c := conn
+    no_sigpipe(&c)
+    req := read_request($&c)
+    if req.len == 0 {
+        close_conn($&c)
+        <<
+    }
+    if declared_body(&req) > MAX_BODY {
+        big := "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        write_conn($&c, &big)
+        close_conn($&c)
+        <<
+    }
+    if strings.has_prefix(&req, "GET /transfer") {
+        empty := ""
+        it := s.xfer.take(&empty)
+        if !it.ready {
+            nf := "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"
+            write_conn($&c, &nf)
+            close_conn($&c)
+            <<
+        }
+        out := "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nX-XuPlay-Mode: " + it.mode + "\r\nX-XuPlay-Device: " + it.device + "\r\nX-XuPlay-Filename: " + it.filename + "\r\nContent-Length: " + strconv.itoa(it.body.len) + "\r\nCache-Control: no-store\r\n\r\n" + it.body
+        write_conn($&c, &out)
+        close_conn($&c)
+        <<
+    }
+    if strings.has_prefix(&req, "POST /upload") {
+        $body := body_of(&req)
+        d := s.xfer.dir()
+        mkdir_quiet(d + "")
+        out_path := d + "/upload_latest.bin"
+        saved := out_path + ""
+        os.write(out_path, body + "") or (err) {
+            bad := http_json("{\"ok\":false,\"error\":\"upload write failed\"}")
+            write_conn($&c, &bad)
+            close_conn($&c)
+            <<
+        }
+        resp := "{\"ok\":true,\"saved\":" + json.quote(&saved) + ",\"bytes\":" + strconv.itoa(body.len) + "}"
+        write_conn($&c, &http_json(resp))
+        close_conn($&c)
+        <<
+    }
+    if strings.has_prefix(&req, "POST /mcp") {
+        $body := body_of(&req)
+        $resp := ""
+        resp = mcp.handle_jsonrpc(&body, s.ws_port) or (err) {
+            resp = "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32603,\"message\":\"internal error\"}}"
+        }
+        write_conn($&c, &http_json(resp))
+        close_conn($&c)
+        <<
+    }
+    if strings.has_prefix(&req, "GET /mcp") {
+        resp := "{\"op\":\"mcp\",\"transport\":\"http\",\"post\":\"/mcp\",\"stdio\":\"xuesp mcp\",\"ws_port\":" + strconv.itoa(s.ws_port) + "}"
+        write_conn($&c, &http_json(resp))
+        close_conn($&c)
+        <<
+    }
+    ok_wire := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+    write_conn($&c, &ok_wire)
+    close_conn($&c)
+}
+
+fn accept_loop(ln net.Listener, s Server) {
+    $l := ln
+    for {
+        conn := l.accept() or (err) {
+            <-
+        }
+        xu handle(conn, s.clone())
+    }
+}
+
+pub fn serve(s Server) bool {
+    if s.port <= 0 {
+        << false
+    }
+    ln := net.listen_on("tcp", "0.0.0.0:" + strconv.itoa(s.port)) or (err) {
+        << false
+    }
+    xu accept_loop(ln, s.clone())
+    << true
+}
